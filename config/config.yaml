@@ -1,0 +1,26 @@
+# GENERAL
+paths:
+  RAW_DIR: "data/raw"
+  PREP_DIR: "data/prep"
+
+# DATASET SPECIFIC
+gencode:
+  urls:
+    fasta: "https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_46/GRCh38.primary_assembly.genome.fa.gz"
+    gtf: "https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_46/gencode.v46.annotation.gtf.gz"
+  paths:
+    fasta: "data/raw/GENCODE/release_46/GRCh38.primary_assembly.genome.fa.gz"
+    gtf: "data/raw/GENCODE/release_46/gencode.v46.annotation.gtf.gz"
+    gtf_parquet: "data/raw/GENCODE/release_46/gencode.v46.annotation.gtf.parquet"
+    star_index: "data/raw/GENCODE/release_46/star_index"
+
+rnaseq:
+  sf3b1mut:
+    metadata: "support/ENA_filereport-compendium-sf3b1mut.tsv"
+    path: "data/raw/ENA/sf3b1mut"
+
+alphagenome_pytorch:
+  urls:
+    weights: "gtca/alphagenome_pytorch"
+  paths:
+    weights: "data/raw/articles/Avsec2026/alphagenome_pytorch/all-folds"

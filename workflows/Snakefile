@@ -1,0 +1,30 @@
+import os
+import numpy as np
+import pandas as pd
+
+configfile: "config/config.yaml"
+
+# Global paths
+TMP_ROOT = os.path.join(config["paths"]["RAW_DIR"], "tmp")
+SUPPORT_DIR = "support"
+
+# Save params for pandas to_csv
+SAVE_PARAMS = {"sep": "\t", "index": False, "compression": "gzip"}
+
+include: "rules/data/alphagenome.smk"
+include: "rules/data/gencode.smk"
+include: "rules/data/sf3b1mut.smk"
+
+rule all:
+    input:
+        # data
+        ## download and preprocess reference genome
+        config["gencode"]["paths"]["fasta"],
+        config["gencode"]["paths"]["gtf"],
+        config["gencode"]["paths"]["gtf_parquet"],
+        config["gencode"]["paths"]["star_index"],
+
+        ## download raw reads, align, preprocess for finetuning
+        os.path.join(config["rnaseq"]["sf3b1mut"]["path"], "STAR", "bigwig_mapping-with_mapped_reads.tsv.gz"),
+
+        # finetuning RNA-seq: coverage and splicing tracks
