@@ -63,7 +63,7 @@ rule star_first_pass:
         sample = "{sample}",
         fastqs_dir = os.path.join(DATA_DIR,"fastqs"),        
         output_dir = os.path.join(DATA_DIR,"STAR","{sample}"),
-        tmp_dir = os.path.join(TMP_ROOT,"{sample}"),
+        tmp_dir = os.path.join(TMP_ROOT,"sf3b1mut","{sample}"),
     output:
         align_done = touch(os.path.join(DATA_DIR,"STAR",".done_align_first","{sample}"))
     threads: 6
@@ -139,7 +139,7 @@ rule star_second_pass:
         sample = "{sample}",
         fastqs_dir = os.path.join(DATA_DIR,"fastqs"),        
         output_dir = os.path.join(DATA_DIR,"STAR","{sample}"),
-        tmp_dir = os.path.join(TMP_ROOT,"{sample}"),
+        tmp_dir = os.path.join(TMP_ROOT,"sf3b1mut","{sample}"),
         memory_limit = 20000000000
     output:
         align_done = touch(os.path.join(DATA_DIR,"STAR",".done_align_second","{sample}"))

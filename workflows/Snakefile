@@ -5,7 +5,7 @@ import pandas as pd
 configfile: "config/config.yaml"
 
 # Global paths
-TMP_ROOT = os.path.join(config["paths"]["RAW_DIR"], "tmp")
+TMP_ROOT = os.path.join(os.path.expanduser("~/scratch"))
 SUPPORT_DIR = "support"
 
 # Save params for pandas to_csv
@@ -26,5 +26,6 @@ rule all:
 
         ## download raw reads, align, preprocess for finetuning
         os.path.join(config["rnaseq"]["sf3b1mut"]["path"], "STAR", "bigwig_mapping-with_mapped_reads.tsv.gz"),
+        os.path.join(config["rnaseq"]["sf3b1mut"]["path"], "STAR", "merged.second_pass.ReadsPerGene.out.tab.gz"),
 
         # finetuning RNA-seq: coverage and splicing tracks
