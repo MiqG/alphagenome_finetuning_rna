@@ -10,7 +10,7 @@ rule download_weights:
         runtime = 2*60,
         memory = 4
     conda:
-        "../envs/alphagenome_pytorch.yaml"
+        "alphagenome_pytorch"
     shell:
         """
         hf download {params.weights} model_all_folds.safetensors --local-dir {output.weights}

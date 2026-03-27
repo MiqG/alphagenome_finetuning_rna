@@ -38,7 +38,7 @@ rule finetune_sf3b1mut:
         runtime = 24*60,  # 24h
         memory = 80  # G
     conda:
-        "../envs/alphagenome_pytorch.yaml"
+        "alphagenome_pytorch"
     shell:
         """
         set -eo pipefail

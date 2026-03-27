@@ -29,7 +29,7 @@ rule borzoi_bw_to_w5:
         runtime = 2*60,
         memory = 8
     conda:
-        "../envs/borzoi.yaml"
+        "borzoi"
     shell:
         """
         python {BW_W5_SCRIPT} {params.bw_file} {output.w5}
@@ -123,7 +123,7 @@ rule borzoi_make_tfrecords:
         runtime = 12*60,
         memory = 64
     conda:
-        "../envs/borzoi.yaml"
+        "borzoi"
     shell:
         """
         set -eo pipefail
@@ -168,7 +168,7 @@ rule borzoi_setup_folds:
         runtime = 1*60,
         memory = 4
     conda:
-        "../envs/borzoi.yaml"
+        "borzoi"
     shell:
         """
         set -eo pipefail
@@ -201,7 +201,7 @@ rule borzoi_transfer:
         runtime = 48*60,
         memory = 40
     conda:
-        "../envs/borzoi.yaml"
+        "borzoi"
     shell:
         """
         set -eo pipefail

@@ -11,7 +11,7 @@ rule download_genome_sequence:
         runtime = 2*60,
         memory = 4
     conda:
-        "../envs/general.yaml"
+        "alphagenome_finetuning_rna"
     shell:
         """
         wget --user-agent="Chrome" --no-check-certificate {params.url} -O - | gunzip | bgzip -c > {output.fasta}
@@ -33,7 +33,7 @@ rule download_genome_annotation:
         runtime = 1*60,
         memory = 4
     conda:
-        "../envs/general.yaml"
+        "alphagenome_finetuning_rna"
     shell:
         """
         wget --user-agent="Chrome" --no-check-certificate {params.url} -O {output.gtf}
@@ -66,7 +66,7 @@ rule build_star_index:
         runtime = 1*60,
         memory = 40
     conda:
-        "../envs/general.yaml"
+        "alphagenome_finetuning_rna"
     shell:
         """
         set -euo pipefail

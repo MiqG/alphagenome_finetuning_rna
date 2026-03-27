@@ -15,7 +15,7 @@ rule borzoi_download_support:
         runtime = 2*60,
         memory = 4
     conda:
-        "../envs/borzoi.yaml"
+        "borzoi"
     shell:
         """
         set -eo pipefail
