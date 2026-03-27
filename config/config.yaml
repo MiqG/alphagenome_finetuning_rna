@@ -24,3 +24,39 @@ alphagenome_pytorch:
     weights: "gtca/alphagenome_pytorch"
   paths:
     weights: "data/raw/articles/Avsec2026/alphagenome_pytorch/all-folds"
+
+borzoi:
+  baskerville_path: "src/baskerville"
+  num_reps: 4
+  pretrained_trunks:
+    - "data/raw/borzoi/pretrain_trunks/trunk_r0.h5"
+    - "data/raw/borzoi/pretrain_trunks/trunk_r1.h5"
+    - "data/raw/borzoi/pretrain_trunks/trunk_r2.h5"
+    - "data/raw/borzoi/pretrain_trunks/trunk_r3.h5"
+  support:
+    blacklist: "data/raw/borzoi/hg38/blacklist_hg38_all.bed"
+    sequences_bed: "data/raw/borzoi/trainsplit/sequences.bed"
+    
+finetuning:
+  borzoi:
+    sf3b1mut:
+      data_dir: "data/prep/borzoi/sf3b1mut"
+      output_dir: "results/finetuning/borzoi/sf3b1mut"
+      params_json: "support/borzoi/params_lora.json"
+      folds: 8
+      clip: 768
+      clip_soft: 384
+      scale: 0.005  # 1/(fragment_length ~200bp) for raw coverage bigwigs
+  alphagenome:
+    finetune_script: "src/alphagenome-pytorch/scripts/finetune.py"
+    sf3b1mut:
+      train_bed: "support/finetuning/train.bed"
+      val_bed: "support/finetuning/val.bed"
+      output_dir: "results/finetuning/alphagenome_pytorch/sf3b1mut"
+      num_gpus: 4
+      modality: "rna_seq"
+      sequence_length: 524288
+      overlap_highres: 1024
+      lr: 1e-3
+      epochs: 10
+      gradient_accumulation_steps: 2
