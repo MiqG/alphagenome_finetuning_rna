@@ -7,7 +7,7 @@ rule download_genome_sequence:
     threads: 1
     resources:
         gres = "none",
-        partition = "gpu_diasfrazer",
+        partition = "genoa64",
         runtime = 2*60,
         memory = 4
     conda:
@@ -29,7 +29,7 @@ rule download_genome_annotation:
     threads: 1
     resources:
         gres = "none",
-        partition = "gpu_diasfrazer",
+        partition = "genoa64",
         runtime = 1*60,
         memory = 4
     conda:
@@ -49,7 +49,7 @@ rule gtf_to_parquet:
     threads: 1
     resources:
         gres = "none",
-        partition = "gpu_diasfrazer",
+        partition = "genoa64",
         runtime = int(0.5*60),
         memory = 4
     run:
@@ -69,7 +69,7 @@ rule build_star_index:
     threads: 20
     resources:
         gres = "none",
-        partition = "gpu_diasfrazer",
+        partition = "genoa64",
         runtime = 1*60,
         memory = 40
     conda:
