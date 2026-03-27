@@ -48,7 +48,7 @@ rule gtf_to_parquet:
         parquet = config["gencode"]["paths"]["gtf_parquet"]
     threads: 1
     resources:
-	gres = "none",
+        gres = "none",
         partition = "gpu_diasfrazer",
         runtime = int(0.5*60),
         memory = 4
