@@ -11,10 +11,10 @@ SUPPORT_DIR = "support"
 # Save params for pandas to_csv
 SAVE_PARAMS = {"sep": "\t", "index": False, "compression": "gzip"}
 
-include: "rules/data/alphagenome.smk"
-include: "rules/data/borzoi.smk"
 include: "rules/data/gencode.smk"
 include: "rules/data/sf3b1mut.smk"
+#include: "rules/data/alphagenome.smk"
+#include: "rules/data/borzoi.smk"
 #include: "rules/models/alphagenome.smk"
 #include: "rules/models/borzoi.smk"
 
