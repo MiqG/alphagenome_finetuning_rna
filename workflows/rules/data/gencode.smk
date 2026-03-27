@@ -46,12 +46,19 @@ rule gtf_to_parquet:
         gtf = config["gencode"]["paths"]["gtf"]
     output:
         parquet = config["gencode"]["paths"]["gtf_parquet"]
+    threads: 1
+    resources:
+	gres = "none",
+        partition = "gpu_diasfrazer",
+        runtime = int(0.5*60),
+        memory = 4
     run:
         import pyranges as pr
         gtf = pr.read_gtf(input.gtf)
         gtf.df.to_parquet(output.parquet, compression="zstd", index=False)
 
         print("Done!")
+
 
 rule build_star_index:
     input:

@@ -35,7 +35,7 @@ rule download_fastq:
     resources:
         gres = "none",
         partition = "genoa64",
-        runtime = 60*2, # minutes
+        runtime = 60*24, # minutes
         memory = 2
     conda:
         "alphagenome_finetuning_rna"
