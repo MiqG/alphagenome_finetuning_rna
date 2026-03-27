@@ -71,12 +71,17 @@ rule build_star_index:
         """
         set -euo pipefail
 
+        bgzip -cd {input.fasta} > {output}/genome.fa
+        zcat {input.gtf} > {output}/annotation.gtf
+
         STAR \
             --runThreadN {threads} \
             --runMode genomeGenerate \
             --genomeDir {output} \
-            --genomeFastaFiles {input.fasta} \
-            --sjdbGTFfile {input.gtf}
+            --genomeFastaFiles {output}/genome.fa \
+            --sjdbGTFfile {output}/annotation.gtf
+
+        rm {output}/genome.fa {output}/annotation.gtf
 
         echo "Done!"
         """
