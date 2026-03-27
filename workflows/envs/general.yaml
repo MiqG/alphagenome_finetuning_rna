@@ -1,3 +1,23 @@
 name: alphagenome_finetuning_rna
 channels:
+  - bioconda
+  - conda-forge
+  - defaults
 dependencies:
+  # alignment
+  - star>=2.7.11
+  - sambamba>=1.0
+  - samtools>=1.18
+  - pigz>=2.7
+  # bigwig
+  - deeptools>=3.5  # provides bamCoverage
+  # python
+  - python>=3.10
+  - numpy
+  - pandas
+  - pyranges  # GTF -> parquet
+  - pysam>=0.22
+  - joblib
+  - tqdm
+  # downloading
+  - wget

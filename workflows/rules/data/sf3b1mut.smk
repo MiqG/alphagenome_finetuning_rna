@@ -37,7 +37,7 @@ rule download_fastq:
         runtime = 3600*2, # 2h
         memory = 2
     conda:
-        "alphagenome_finetuning_rna"
+        "../envs/general.yaml"
     shell:
         """
         # download
@@ -73,7 +73,7 @@ rule star_first_pass:
         runtime = 6*60, # h
         memory = 40 # G
     conda:
-        "alphagenome_finetuning_rna"
+        "../envs/general.yaml"
     shell:
         """
         set -eo pipefail
@@ -117,7 +117,7 @@ rule merge_first_pass_splice_junctions:
         runtime = 1*60, # h
         memory = 2 # GB
     conda:
-        "alphagenome_finetuning_rna"
+        "../envs/general.yaml"
     shell:
         """
         set -eo pipefail
@@ -150,7 +150,7 @@ rule star_second_pass:
         runtime = 6*60, # h
         memory = 40 # G
     conda:
-        "alphagenome_finetuning_rna"
+        "../envs/general.yaml"
     shell:
         """
         set -eo pipefail
@@ -212,7 +212,7 @@ rule star_combine_genexpr:
         runtime = 6*60, # h
         memory = 2 # G
     conda:
-        "alphagenome_finetuning_rna"
+        "../envs/general.yaml"
     shell:
         """
         set -euo pipefail
@@ -264,7 +264,7 @@ rule prep_bam:
         runtime = 1*60, # h
         memory = 2 # G
     conda:
-        "alphagenome_finetuning_rna"
+        "../envs/general.yaml"
     shell:
         """
         set -eo pipefail
@@ -313,7 +313,7 @@ rule make_bigwig:
         runtime = 12*60, # h in minutes
         memory = 10 # G
     conda:
-        "alphagenome_finetuning_rna"
+        "../envs/general.yaml"
     shell:
         """
         echo "Indexing BAM..."

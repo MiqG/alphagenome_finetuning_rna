@@ -4,8 +4,14 @@ rule download_genome_sequence:
     output:
         fasta = config["gencode"]["paths"]["fasta"],
         index = config["gencode"]["paths"]["fasta"] + ".fai"
+    threads: 1
+    resources:
+        gres = "none",
+        partition = "gpu_diasfrazer",
+        runtime = 2*60,
+        memory = 4
     conda:
-        "alphagenome_finetuning_rna"
+        "../envs/general.yaml"
     shell:
         """
         wget --user-agent="Chrome" --no-check-certificate {params.url} -O - | gunzip | bgzip -c > {output.fasta}
@@ -20,8 +26,14 @@ rule download_genome_annotation:
         url = config["gencode"]["urls"]["gtf"],
     output:
         gtf = config["gencode"]["paths"]["gtf"]
+    threads: 1
+    resources:
+        gres = "none",
+        partition = "gpu_diasfrazer",
+        runtime = 1*60,
+        memory = 4
     conda:
-        "alphagenome_finetuning_rna"
+        "../envs/general.yaml"
     shell:
         """
         wget --user-agent="Chrome" --no-check-certificate {params.url} -O {output.gtf}
@@ -47,14 +59,14 @@ rule build_star_index:
         fasta = config["gencode"]["paths"]["fasta"]
     output:
         directory(config["gencode"]["paths"]["star_index"])
-    conda:
-        "alphagenome_finetuning_rna"
     threads: 20
     resources:
         gres = "none",
         partition = "gpu_diasfrazer",
-        runtime = 1*60, # h
-        memory = 40 # G
+        runtime = 1*60,
+        memory = 40
+    conda:
+        "../envs/general.yaml"
     shell:
         """
         set -euo pipefail

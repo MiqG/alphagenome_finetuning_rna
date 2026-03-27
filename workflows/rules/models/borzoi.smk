@@ -29,7 +29,7 @@ rule borzoi_bw_to_w5:
         runtime = 2*60,
         memory = 8
     conda:
-        "borzoi"
+        "../envs/borzoi.yaml"
     shell:
         """
         python {BW_W5_SCRIPT} {params.bw_file} {output.w5}
@@ -123,7 +123,7 @@ rule borzoi_make_tfrecords:
         runtime = 12*60,
         memory = 64
     conda:
-        "borzoi"
+        "../envs/borzoi.yaml"
     shell:
         """
         set -eo pipefail
@@ -161,8 +161,14 @@ rule borzoi_setup_folds:
         tfr_dir = os.path.join(BORZOI_DATA_DIR, "tfr"),
         out_dir = BORZOI_OUT_DIR,
         folds = config["finetuning"]["borzoi"]["sf3b1mut"]["folds"],
+    threads: 1
+    resources:
+        gres = "none",
+        partition = "gpu_diasfrazer",
+        runtime = 1*60,
+        memory = 4
     conda:
-        "borzoi"
+        "../envs/borzoi.yaml"
     shell:
         """
         set -eo pipefail
@@ -188,13 +194,14 @@ rule borzoi_transfer:
     params:
         out_dir = os.path.join(BORZOI_OUT_DIR, "rep{rep}"),
         data_dir = os.path.join(BORZOI_OUT_DIR, "f3c0", "data0"),
+    threads: 1
     resources:
         gres = "gpu:1",
         partition = "gpu_diasfrazer",
         runtime = 48*60,
         memory = 40
     conda:
-        "borzoi"
+        "../envs/borzoi.yaml"
     shell:
         """
         set -eo pipefail

@@ -8,13 +8,14 @@ rule borzoi_download_support:
         hg38_dir = os.path.dirname(config["borzoi"]["support"]["blacklist"]),
         trainsplit_dir = os.path.dirname(config["borzoi"]["support"]["sequences_bed"]),
         trunks_dir = os.path.dirname(config["borzoi"]["pretrained_trunks"][0]),
+    threads: 1
     resources:
         gres = "none",
         partition = "gpu_diasfrazer",
         runtime = 2*60,
         memory = 4
     conda:
-        "borzoi"
+        "../envs/borzoi.yaml"
     shell:
         """
         set -eo pipefail

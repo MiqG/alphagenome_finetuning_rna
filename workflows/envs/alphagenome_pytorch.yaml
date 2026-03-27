@@ -1,5 +1,15 @@
 name: alphagenome_pytorch
 channels:
-
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
 dependencies:
-
+  - python>=3.12
+  - pytorch>=2.0
+  - pytorch-cuda  # GPU support
+  - pip
+  - pip:
+      - huggingface_hub[cli]  # provides hf CLI for weight download
+      - alphagenome-pytorch[finetuning]  # adds pybigwig, pandas, tqdm, pyfaidx
+      - safetensors  # for loading .safetensors weights

@@ -5,8 +5,14 @@ rule download_weights:
         weights = config["alphagenome_pytorch"]["urls"]["weights"]
     output:
         weights = directory(config["alphagenome_pytorch"]["paths"]["weights"])
+    threads: 1
+    resources:
+        gres = "none",
+        partition = "gpu_diasfrazer",
+        runtime = 2*60,
+        memory = 4
     conda:
-        "publication_likelihood"
+        "../envs/alphagenome_pytorch.yaml"
     shell:
         """
         hf download {params.weights} model_all_folds.safetensors --local-dir {output.weights}
@@ -52,7 +58,7 @@ rule finetune_sf3b1mut:
         runtime = 24*60,  # 24h
         memory = 80  # G
     conda:
-        "alphagenome_finetuning_rna"
+        "../envs/general.yaml"
     shell:
         """
         set -eo pipefail
