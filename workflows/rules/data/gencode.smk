@@ -71,6 +71,7 @@ rule build_star_index:
         """
         set -euo pipefail
 
+        mkdir -p {output}
         bgzip -cd {input.fasta} > {output}/genome.fa
         zcat {input.gtf} > {output}/annotation.gtf
 
