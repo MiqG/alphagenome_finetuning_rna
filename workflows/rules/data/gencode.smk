@@ -51,7 +51,7 @@ rule gtf_to_parquet:
         gres = "none",
         partition = "gpu_diasfrazer",
         runtime = int(0.5*60),
-        memory = 4
+        memory = 12
     run:
         import pyranges as pr
         gtf = pr.read_gtf(input.gtf)
