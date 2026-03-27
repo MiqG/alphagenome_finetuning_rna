@@ -49,11 +49,12 @@ All paths, URLs, and parameters are centralized in `config/config.yaml`, organiz
 
 ### Data rule modules (`workflows/rules/data/`)
 - `gencode.smk` — downloads GRCh38 FASTA and GENCODE v46 GTF; builds STAR index; converts GTF to parquet
-- `alphagenome.smk` — downloads AlphaGenome-PyTorch weights from Hugging Face via `hf` CLI; runs AlphaGenome LoRA finetuning via `torchrun`
+- `alphagenome.smk` — downloads AlphaGenome-PyTorch weights from Hugging Face via `hf` CLI
 - `borzoi.smk` — downloads Borzoi pretrained trunks, blacklist, and sequences.bed from GCS
 - `sf3b1mut.smk` — full RNA-seq processing pipeline (see below)
 
 ### Model rule modules (`workflows/rules/models/`)
+- `alphagenome.smk` — AlphaGenome LoRA finetuning via `torchrun`; defines `FINETUNE_SCRIPT` global
 - `borzoi.smk` — Borzoi transfer learning pipeline (see below)
 
 ### RNA-seq pipeline (`sf3b1mut.smk`)
@@ -64,9 +65,9 @@ All paths, URLs, and parameters are centralized in `config/config.yaml`, organiz
 5. Mapped read counting via pysam
 6. Gene expression matrix merging across samples
 
-### AlphaGenome finetuning (`alphagenome.smk` — `finetune_sf3b1mut`)
+### AlphaGenome finetuning (`models/alphagenome.smk` — `finetune_sf3b1mut`)
 - Uses `torchrun --nproc_per_node=4` with sequence parallelism
-- Script sourced from `src/alphagenome-pytorch/scripts/finetune.py` (configured via `finetuning.alphagenome.finetune_script`)
+- Script path set via `FINETUNE_SCRIPT` global (from `finetuning.alphagenome.finetune_script` in config), pointing to `src/alphagenome-pytorch/scripts/finetune.py`
 - Script is copied to a tmp file before launch to avoid NFS issues under torchrun
 - `--bigwig` accepts multiple files (all samples × strands passed as a list)
 - Requires `support/finetuning/train.bed` and `support/finetuning/val.bed`
@@ -84,6 +85,16 @@ Multi-step pipeline following the baskerville transfer learning tutorial:
 - Umap mappability filtering is omitted
 - `scale: 0.005` in config assumes ~200bp fragment length for raw coverage bigwigs (1/fragment_length)
 - `params_lora.json` is auto-generated from `src/baskerville/tests/data/transfer/json/borzoi_lora.json` — do not create it manually
+
+## Conda environments
+
+Defined in `workflows/envs/`. All `conda:` directives in rule files use relative yaml paths (e.g. `"../envs/general.yaml"`), not bare env names.
+
+| File | Env name | Used for |
+|------|----------|----------|
+| `general.yaml` | `alphagenome_finetuning_rna` | RNA-seq processing (STAR, sambamba, samtools, deeptools, pysam, pyranges) |
+| `alphagenome_pytorch.yaml` | `alphagenome_pytorch` | AlphaGenome weight download and finetuning (PyTorch, alphagenome-pytorch[finetuning], hf CLI) |
+| `borzoi.yaml` | `borzoi` | Borzoi download and training (baskerville, tensorflow 2.15, gsutil) |
 
 ## External dependencies
 
