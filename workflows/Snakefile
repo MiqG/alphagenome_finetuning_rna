@@ -12,7 +12,7 @@ SUPPORT_DIR = "support"
 SAVE_PARAMS = {"sep": "\t", "index": False, "compression": "gzip"}
 
 include: "rules/data/gencode.smk"
-#include: "rules/data/sf3b1mut.smk"
+include: "rules/data/sf3b1mut.smk"
 #include: "rules/data/alphagenome.smk"
 #include: "rules/data/borzoi.smk"
 #include: "rules/models/alphagenome.smk"
@@ -28,8 +28,8 @@ rule all:
         config["gencode"]["paths"]["star_index"],
 
         ## download raw reads, align, preprocess for finetuning
-        #os.path.join(config["rnaseq"]["sf3b1mut"]["path"], "STAR", "bigwig_mapping-with_mapped_reads.tsv.gz"),
-        #os.path.join(config["rnaseq"]["sf3b1mut"]["path"], "STAR", "merged.second_pass.ReadsPerGene.out.tab.gz"),
+        os.path.join(config["rnaseq"]["sf3b1mut"]["path"], "STAR", "bigwig_mapping-with_mapped_reads.tsv.gz"),
+        os.path.join(config["rnaseq"]["sf3b1mut"]["path"], "STAR", "merged.second_pass.ReadsPerGene.out.tab.gz"),
 
         # ## AlphaGenome finetuning
         # os.path.join(config["finetuning"]["alphagenome"]["sf3b1mut"]["output_dir"], ".done"),

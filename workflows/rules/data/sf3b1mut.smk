@@ -11,6 +11,7 @@ STRANDS = ["forward","reverse"]
 # get urls and fastq sizes
 metadata = pd.read_table(config["rnaseq"]["sf3b1mut"]["metadata"])
 metadata = metadata.loc[metadata["library_source"]=="TRANSCRIPTOMIC"]
+#metadata = metadata.iloc[[-1]]
 
 ## URLS to download
 URLS = metadata["fastq_ftp"].str.split(";").str[0].apply(os.path.dirname).to_list()
@@ -33,8 +34,8 @@ rule download_fastq:
     threads: 1
     resources:
         gres = "none",
-        partition = "gpu_diasfrazer",
-        runtime = 3600*2, # 2h
+        partition = "genoa64",
+        runtime = 60*2, # minutes
         memory = 2
     conda:
         "alphagenome_finetuning_rna"
@@ -69,7 +70,7 @@ rule star_first_pass:
     threads: 6
     resources:
         gres = "none",
-        partition = "gpu_diasfrazer",
+        partition = "genoa64",
         runtime = 6*60, # h
         memory = 40 # G
     conda:
@@ -113,7 +114,7 @@ rule merge_first_pass_splice_junctions:
     threads: 1
     resources:
         gres = "none",
-        partition = "gpu_diasfrazer",
+        partition = "genoa64",
         runtime = 1*60, # h
         memory = 2 # GB
     conda:
@@ -146,7 +147,7 @@ rule star_second_pass:
     threads: 6
     resources:
         gres = "none",
-        partition = "gpu_diasfrazer",
+        partition = "genoa64",
         runtime = 6*60, # h
         memory = 40 # G
     conda:
@@ -208,7 +209,7 @@ rule star_combine_genexpr:
     threads: 1
     resources:
         gres = "none",
-        partition = "gpu_diasfrazer",
+        partition = "genoa64",
         runtime = 6*60, # h
         memory = 2 # G
     conda:
@@ -258,7 +259,7 @@ rule prep_bam:
     threads: 6
     resources:
         gres = "none",
-        partition = "gpu_diasfrazer",
+        partition = "genoa64",
         runtime = 1*60, # h
         memory = 2 # G
     conda:
@@ -307,7 +308,7 @@ rule make_bigwig:
     threads: 1
     resources:
         gres = "none",
-        partition = "gpu_diasfrazer",
+        partition = "genoa64",
         runtime = 12*60, # h in minutes
         memory = 10 # G
     conda:
@@ -339,7 +340,7 @@ rule make_bigwig_mapping:
     threads: 1
     resources:
         gres = "none",
-        partition = "gpu_diasfrazer",
+        partition = "genoa64",
         runtime = int(0.5*60), # h in minutes
         memory = 2 # G
     run:
@@ -377,7 +378,7 @@ rule get_mapped_reads:
     threads: 12
     resources:
         gres = "none",
-        partition = "gpu_diasfrazer",
+        partition = "genoa64",
         runtime = 1*60, # h in minutes
         memory = 10 # G
     run:
