@@ -252,9 +252,7 @@ rule prep_bam:
     params:
         star_scripts_dir = "~/repositories/STAR-2.7.11a/extras/scripts",
         output_dir = os.path.join(DATA_DIR,"STAR","{sample}"),
-        chromosomes_oi = "' or ref_name=='".join(
-            pd.read_table(os.path.join(SUPPORT_DIR,"chromosomes_oi.txt"), header=None)[0].to_list()
-        )
+        chromosomes_oi = "' or ref_name=='".join(config["variables"]["CHROMOSOMES"])
     output:
         filt_done = touch(os.path.join(DATA_DIR,"STAR",".done_prep_bam","{sample}"))
     threads: 6
