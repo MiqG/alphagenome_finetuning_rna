@@ -62,8 +62,9 @@ finetuning:
       modality: "rna_seq"
       sequence_length: 1048576
       overlap_highres: 1024
-      lr: 1e-3
+      lr: 1e-4
+      warmup_steps: 200
       epochs: 10
-      batch_size: 2
-      gradient_accumulation_steps: 4
-      track_means_samples: 200  # intervals to sample for track mean estimation (subset for speed)
+      batch_size: 1
+      gradient_accumulation_steps: 8
+      track_means_samples: 500  # intervals to sample for track mean estimation (subset for speed)
