@@ -46,6 +46,7 @@ rule finetune_sf3b1mut:
         memory = 80  # G
     conda:
         "alphagenome_pytorch"
+    retries: 4 # ~ 2 epochs
     shell:
         """
         set -eo pipefail
