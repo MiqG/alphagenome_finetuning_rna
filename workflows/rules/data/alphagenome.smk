@@ -1,4 +1,4 @@
-ALPHAGENOME_FOLDS = ["FOLD_0", FOLD_1", "FOLD_2", "FOLD_3"]
+ALPHAGENOME_FOLDS = ["FOLD_0", "FOLD_1", "FOLD_2", "FOLD_3"]
 
 
 rule alphagenome_download_sequences_bed:
