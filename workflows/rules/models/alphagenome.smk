@@ -1,24 +1,29 @@
 FINETUNE_SCRIPT = config["finetuning"]["alphagenome"]["finetune_script"]
+ALPHAGENOME_FOLDS_DIR = config["finetuning"]["alphagenome"]["folds_dir"]
+
+
 
 rule finetune_sf3b1mut:
+    wildcard_constraints:
+        fold = "|".join(ALPHAGENOME_FOLDS)
     input:
         weights = config["alphagenome_pytorch"]["paths"]["weights"],
         genome = config["gencode"]["paths"]["fasta"],
-        train_bed = config["finetuning"]["alphagenome"]["sf3b1mut"]["train_bed"],
-        val_bed = config["finetuning"]["alphagenome"]["sf3b1mut"]["val_bed"],
+        train_bed = os.path.join(ALPHAGENOME_FOLDS_DIR, "{fold}", "train.bed"),
+        val_bed = os.path.join(ALPHAGENOME_FOLDS_DIR, "{fold}", "valid.bed"),
         bigwigs = [
             os.path.join(
                 config["rnaseq"]["sf3b1mut"]["path"], "STAR", sample,
                 "second_pass.Aligned.sortedByCoord.out.filtered.{strand}.bw".format(strand=strand)
             )
-            for sample in SAMPLES
+            for sample in SAMPLES[:2]
             for strand in STRANDS
         ],
         bigwig_mapping = os.path.join(
             config["rnaseq"]["sf3b1mut"]["path"], "STAR", "bigwig_mapping-with_mapped_reads.tsv.gz"
         ),
     output:
-        done = touch(os.path.join(config["finetuning"]["alphagenome"]["sf3b1mut"]["output_dir"], ".done"))
+        done = touch(os.path.join(config["finetuning"]["alphagenome"]["sf3b1mut"]["output_dir"], "{fold}", ".done"))
     params:
         num_gpus = config["finetuning"]["alphagenome"]["sf3b1mut"]["num_gpus"],
         modality = config["finetuning"]["alphagenome"]["sf3b1mut"]["modality"],
@@ -27,7 +32,7 @@ rule finetune_sf3b1mut:
         lr = config["finetuning"]["alphagenome"]["sf3b1mut"]["lr"],
         epochs = config["finetuning"]["alphagenome"]["sf3b1mut"]["epochs"],
         gradient_accumulation_steps = config["finetuning"]["alphagenome"]["sf3b1mut"]["gradient_accumulation_steps"],
-        output_dir = config["finetuning"]["alphagenome"]["sf3b1mut"]["output_dir"],
+        output_dir = os.path.join(config["finetuning"]["alphagenome"]["sf3b1mut"]["output_dir"], "{fold}"),
         pretrained_weights = os.path.join(
             config["alphagenome_pytorch"]["paths"]["weights"], "model_all_folds.safetensors"
         ),

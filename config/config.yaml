@@ -39,6 +39,7 @@ borzoi:
   support:
     blacklist: "data/raw/borzoi/hg38/blacklist_hg38_all.bed"
     sequences_bed: "data/raw/borzoi/trainsplit/sequences.bed"
+    sequences_bed_url: "https://github.com/calico/borzoi/raw/5c9358222b5026abb733ed5fb84f3f6c77239b37/data/sequences_human.bed.gz"
     
 finetuning:
   borzoi:
@@ -52,13 +53,14 @@ finetuning:
       scale: 0.005  # 1/(fragment_length ~200bp) for raw coverage bigwigs
   alphagenome:
     finetune_script: "src/alphagenome-pytorch/scripts/finetune.py"
+    convert_folds_script: "src/alphagenome-pytorch/scripts/convert_borzoi_folds.py"
+    sequences_bed_gz: "support/finetuning/sequences_human.bed.gz"
+    folds_dir: "support/finetuning/alphagenome"
     sf3b1mut:
-      train_bed: "support/finetuning/train.bed"
-      val_bed: "support/finetuning/val.bed"
       output_dir: "results/finetuning/alphagenome_pytorch/sf3b1mut"
       num_gpus: 4
       modality: "rna_seq"
-      sequence_length: 524288
+      sequence_length: 1048576
       overlap_highres: 1024
       lr: 1e-3
       epochs: 10
