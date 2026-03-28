@@ -40,7 +40,7 @@ rule finetune_sf3b1mut:
         ),
     threads: 6
     resources:
-        gres = "gpu:7g.80g:1",
+        gres = "gpu:7g.80gb:1",
         partition = "gpu",
         runtime = 12*60,  # 12h
         memory = 80  # G
