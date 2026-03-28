@@ -15,7 +15,7 @@ rule finetune_sf3b1mut:
                 config["rnaseq"]["sf3b1mut"]["path"], "STAR", sample,
                 "second_pass.Aligned.sortedByCoord.out.filtered.{strand}.bw".format(strand=strand)
             )
-            for sample in SAMPLES[:2] # DEV
+            for sample in [SAMPLES[1], SAMPLES[4]] # DEV
             for strand in STRANDS
         ],
         bigwig_mapping = os.path.join(
@@ -38,10 +38,10 @@ rule finetune_sf3b1mut:
         pretrained_weights = os.path.join(
             config["alphagenome_pytorch"]["paths"]["weights"], "model_all_folds.safetensors"
         ),
-    threads: 4  # number of GPUs
+    threads: 6
     resources:
-        gres = "gpu:4",
-        partition = "gpu_diasfrazer",
+        gres = "gpu:7g.80g:1",
+        partition = "gpu",
         runtime = 24*60,  # 24h
         memory = 80  # G
     conda:
@@ -55,6 +55,7 @@ rule finetune_sf3b1mut:
         cp {FINETUNE_SCRIPT} "$FINETUNE_SCRIPT"
 
         torchrun --nproc_per_node={params.num_gpus} "$FINETUNE_SCRIPT" \
+            --num-workers {threads} \
             --mode lora \
             --genome {input.genome} \
             --modality {params.modality} \
@@ -63,7 +64,6 @@ rule finetune_sf3b1mut:
             --val-bed {input.val_bed} \
             --pretrained-weights {params.pretrained_weights} \
             --gradient-checkpointing \
-            --no-save-checkpoints \
             --lr {params.lr} \
             --warmup-steps {params.warmup_steps} \
             --batch-size {params.batch_size} \
