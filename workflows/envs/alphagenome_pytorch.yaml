@@ -11,4 +11,5 @@ dependencies:
   - pip:
       - huggingface_hub[cli]  # provides hf CLI for weight download
       - alphagenome-pytorch[finetuning]  # adds pybigwig, pandas, tqdm, pyfaidx
+      - biopython>=1.73  # required by pyfaidx to read bgzipped FASTA
       - safetensors  # for loading .safetensors weights
