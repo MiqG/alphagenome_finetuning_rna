@@ -1,3 +1,4 @@
+src/alphagenome-pytorch/*
 scratch/*
 support/private/*
 notebooks/figures/*/*/*
