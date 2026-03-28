@@ -16,7 +16,7 @@ rule finetune_sf3b1mut:
                 config["rnaseq"]["sf3b1mut"]["path"], "STAR", sample,
                 "second_pass.Aligned.sortedByCoord.out.filtered.{strand}.bw".format(strand=strand)
             )
-            for sample in SAMPLES[:2]
+            for sample in SAMPLES[:2] # DEV
             for strand in STRANDS
         ],
         bigwig_mapping = os.path.join(

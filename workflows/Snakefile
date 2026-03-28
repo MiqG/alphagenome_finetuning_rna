@@ -36,7 +36,7 @@ rule all:
         # ## AlphaGenome finetuning (one done file per fold)
         expand(
             os.path.join(config["finetuning"]["alphagenome"]["sf3b1mut"]["output_dir"], "{fold}", ".done"),
-            fold=ALPHAGENOME_FOLDS,
+            fold=ALPHAGENOME_FOLDS[0], # DEV
         ),
 
         # ## Borzoi finetuning (one done file per replicate)

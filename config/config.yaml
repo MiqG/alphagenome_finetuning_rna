@@ -54,8 +54,8 @@ finetuning:
   alphagenome:
     finetune_script: "src/alphagenome-pytorch/scripts/finetune.py"
     convert_folds_script: "src/alphagenome-pytorch/scripts/convert_borzoi_folds.py"
-    sequences_bed_gz: "support/finetuning/sequences_human.bed.gz"
-    folds_dir: "support/finetuning/alphagenome"
+    sequences_bed_gz: "data/prep/finetuning/sequences_human.bed.gz"
+    folds_dir: "data/prep/finetuning/alphagenome"
     sf3b1mut:
       output_dir: "results/finetuning/alphagenome_pytorch/sf3b1mut"
       num_gpus: 4
