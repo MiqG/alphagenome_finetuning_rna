@@ -30,6 +30,7 @@ rule finetune_sf3b1mut:
         overlap_highres = config["finetuning"]["alphagenome"]["sf3b1mut"]["overlap_highres"],
         lr = config["finetuning"]["alphagenome"]["sf3b1mut"]["lr"],
         epochs = config["finetuning"]["alphagenome"]["sf3b1mut"]["epochs"],
+        batch_size = config["finetuning"]["alphagenome"]["sf3b1mut"]["batch_size"],
         gradient_accumulation_steps = config["finetuning"]["alphagenome"]["sf3b1mut"]["gradient_accumulation_steps"],
         track_means_samples = config["finetuning"]["alphagenome"]["sf3b1mut"]["track_means_samples"],
         output_dir = os.path.join(config["finetuning"]["alphagenome"]["sf3b1mut"]["output_dir"], "{fold}"),
@@ -64,6 +65,7 @@ rule finetune_sf3b1mut:
             --no-save-checkpoints \
             --lr {params.lr} \
             --warmup-steps 0 \
+            --batch-size {params.batch_size} \
             --gradient-accumulation-steps {params.gradient_accumulation_steps} \
             --epochs {params.epochs} \
             --output-dir {params.output_dir} \
