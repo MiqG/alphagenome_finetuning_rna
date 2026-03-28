@@ -2,7 +2,6 @@ FINETUNE_SCRIPT = config["finetuning"]["alphagenome"]["finetune_script"]
 ALPHAGENOME_FOLDS_DIR = config["finetuning"]["alphagenome"]["folds_dir"]
 
 
-
 rule finetune_sf3b1mut:
     wildcard_constraints:
         fold = "|".join(ALPHAGENOME_FOLDS)
