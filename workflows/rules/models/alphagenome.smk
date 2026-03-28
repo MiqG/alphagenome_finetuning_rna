@@ -42,7 +42,7 @@ rule finetune_sf3b1mut:
     resources:
         gres = "gpu:7g.80g:1",
         partition = "gpu",
-        runtime = 24*60,  # 24h
+        runtime = 12*60,  # 12h
         memory = 80  # G
     conda:
         "alphagenome_pytorch"
@@ -64,6 +64,7 @@ rule finetune_sf3b1mut:
             --val-bed {input.val_bed} \
             --pretrained-weights {params.pretrained_weights} \
             --gradient-checkpointing \
+            --resume auto \
             --lr {params.lr} \
             --warmup-steps {params.warmup_steps} \
             --batch-size {params.batch_size} \
