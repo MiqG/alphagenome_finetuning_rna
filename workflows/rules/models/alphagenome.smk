@@ -24,7 +24,7 @@ rule finetune_sf3b1mut:
     output:
         done = touch(os.path.join(config["finetuning"]["alphagenome"]["sf3b1mut"]["output_dir"], "{fold}", ".done"))
     params:
-        num_gpus = config["finetuning"]["alphagenome"]["sf3b1mut"]["num_gpus"],
+        num_gpus = 1, #config["finetuning"]["alphagenome"]["sf3b1mut"]["num_gpus"],
         modality = config["finetuning"]["alphagenome"]["sf3b1mut"]["modality"],
         sequence_length = config["finetuning"]["alphagenome"]["sf3b1mut"]["sequence_length"],
         overlap_highres = config["finetuning"]["alphagenome"]["sf3b1mut"]["overlap_highres"],
