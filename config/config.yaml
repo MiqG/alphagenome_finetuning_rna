@@ -65,3 +65,4 @@ finetuning:
       lr: 1e-3
       epochs: 10
       gradient_accumulation_steps: 2
+      track_means_samples: 200  # intervals to sample for track mean estimation (subset for speed)

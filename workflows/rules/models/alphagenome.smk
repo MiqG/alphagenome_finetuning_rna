@@ -31,6 +31,7 @@ rule finetune_sf3b1mut:
         lr = config["finetuning"]["alphagenome"]["sf3b1mut"]["lr"],
         epochs = config["finetuning"]["alphagenome"]["sf3b1mut"]["epochs"],
         gradient_accumulation_steps = config["finetuning"]["alphagenome"]["sf3b1mut"]["gradient_accumulation_steps"],
+        track_means_samples = config["finetuning"]["alphagenome"]["sf3b1mut"]["track_means_samples"],
         output_dir = os.path.join(config["finetuning"]["alphagenome"]["sf3b1mut"]["output_dir"], "{fold}"),
         pretrained_weights = os.path.join(
             config["alphagenome_pytorch"]["paths"]["weights"], "model_all_folds.safetensors"
@@ -68,7 +69,8 @@ rule finetune_sf3b1mut:
             --output-dir {params.output_dir} \
             --sequence-parallel \
             --overlap-highres {params.overlap_highres} \
-            --sequence-length {params.sequence_length}
+            --sequence-length {params.sequence_length} \
+            --track-means-samples {params.track_means_samples}
 
         rm -f "$FINETUNE_SCRIPT"
         echo "Done!"
