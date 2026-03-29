@@ -68,3 +68,4 @@ finetuning:
       batch_size: 1
       gradient_accumulation_steps: 8
       track_means_samples: 500  # intervals to sample for track mean estimation (subset for speed)
+      save_every_steps: 500
