@@ -1,4 +1,4 @@
-src/alphagenome-pytorch/*
+src/alphagenome-pytorch
 scratch/*
 support/private/*
 notebooks/figures/*/*/*

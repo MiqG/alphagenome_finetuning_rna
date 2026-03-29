@@ -1,6 +1,7 @@
 FINETUNE_SCRIPT = config["finetuning"]["alphagenome"]["finetune_script"]
 ALPHAGENOME_FOLDS_DIR = config["finetuning"]["alphagenome"]["folds_dir"]
 
+# TODO: rename tracks, train 10 epochs, finetune splicing heads
 
 rule finetune_sf3b1mut:
     wildcard_constraints:
@@ -42,7 +43,8 @@ rule finetune_sf3b1mut:
     resources:
         gres = "gpu:7g.80gb:1",
         partition = "gpu",
-        runtime = 12*60,  # 12h
+        #runtime = 12*60,  # minutes
+        runtime = 6,  # minutes
         memory = 80  # G
     conda:
         "alphagenome_pytorch"
@@ -75,7 +77,8 @@ rule finetune_sf3b1mut:
             --sequence-parallel \
             --overlap-highres {params.overlap_highres} \
             --sequence-length {params.sequence_length} \
-            --track-means-samples {params.track_means_samples}
+            --track-means-samples {params.track_means_samples} \
+            --run-name {wildcards.fold}
 
         rm -f "$FINETUNE_SCRIPT"
         echo "Done!"
