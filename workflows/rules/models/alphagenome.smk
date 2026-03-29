@@ -78,7 +78,7 @@ rule finetune_sf3b1mut:
             --overlap-highres {params.overlap_highres} \
             --sequence-length {params.sequence_length} \
             --track-means-samples {params.track_means_samples} \
-            --run-name {wildcards.fold}
+            --run-name run
 
         rm -f "$FINETUNE_SCRIPT"
         echo "Done!"
