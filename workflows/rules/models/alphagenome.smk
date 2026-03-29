@@ -44,7 +44,7 @@ rule finetune_sf3b1mut:
         gres = "gpu:7g.80gb:1",
         partition = "gpu",
         #runtime = 12*60,  # minutes
-        runtime = 6,  # minutes
+        runtime = 3,  # minutes
         memory = 80  # G
     conda:
         "alphagenome_pytorch"
