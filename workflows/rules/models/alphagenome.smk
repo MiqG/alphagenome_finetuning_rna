@@ -19,6 +19,14 @@ rule finetune_sf3b1mut:
             for sample in [SAMPLES[1], SAMPLES[4]] # DEV
             for strand in STRANDS
         ],
+        star_junctions = [
+            os.path.join(
+                config["rnaseq"]["sf3b1mut"]["path"], "STAR", sample,
+                "second_pass.SJ.{strand}.tab".format(strand=strand)
+            )
+            for sample in [SAMPLES[1], SAMPLES[4]] # DEV
+            for strand in ["fwd", "rev"]
+        ],
         bigwig_mapping = os.path.join(
             config["rnaseq"]["sf3b1mut"]["path"], "STAR", "bigwig_mapping-with_mapped_reads.tsv.gz"
         ),
@@ -48,10 +56,11 @@ rule finetune_sf3b1mut:
         memory = 80  # G
     conda:
         "alphagenome_pytorch"
-    retries: 4 # ~ 2 epochs
+    retries: 0 #DEV 4 # ~ 2 epochs
     shell:
         """
         set -eo pipefail
+        export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
         # Copy finetune script to tmp to avoid NFS issues under torchrun
         FINETUNE_SCRIPT=$(mktemp /tmp/finetune_XXXXXX.py)
@@ -63,6 +72,7 @@ rule finetune_sf3b1mut:
             --genome {input.genome} \
             --modality {params.modality} \
             --bigwig {input.bigwigs} \
+            --star-junctions {input.star_junctions} \
             --train-bed {input.train_bed} \
             --val-bed {input.val_bed} \
             --pretrained-weights {params.pretrained_weights} \

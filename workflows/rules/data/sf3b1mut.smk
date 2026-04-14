@@ -195,8 +195,29 @@ rule star_second_pass:
         fi
 
         echo "Done!"
-        """   
-        
+        """
+
+rule star_split_junctions:
+    """Split second-pass STAR SJ.out.tab into strand-specific files.
+
+    Column 4 of SJ.out.tab encodes strand: 1 = forward (+), 2 = reverse (-).
+    Undefined-strand junctions (0) are discarded.
+    """
+    input:
+        align_done = os.path.join(DATA_DIR, "STAR", ".done_align_second", "{sample}"),
+    output:
+        fwd = os.path.join(DATA_DIR, "STAR", "{sample}", "second_pass.SJ.fwd.tab"),
+        rev = os.path.join(DATA_DIR, "STAR", "{sample}", "second_pass.SJ.rev.tab"),
+    params:
+        sj = os.path.join(DATA_DIR, "STAR", "{sample}", "second_pass.SJ.out.tab"),
+    conda:
+        "alphagenome_finetuning_rna"
+    shell:
+        """
+        awk '$4 == 1' {params.sj} > {output.fwd}
+        awk '$4 == 2' {params.sj} > {output.rev}
+        """
+
 rule star_combine_genexpr:
     input:
         [os.path.join(DATA_DIR,"STAR",".done_align_second","{sample}").format(sample=sample) for sample in SAMPLES]
