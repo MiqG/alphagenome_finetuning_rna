@@ -1,0 +1,7 @@
+Building DAG of jobs...
+MissingInputException in rule overfit_sf3b1mut in file /users/diasfrazer/manglada/projects/alphagenome_finetuning_rna/workflows/overfit_alphagenome.smk, line 56:
+Missing input files for rule overfit_sf3b1mut:
+    output: results/finetuning/alphagenome_pytorch/overfit/overfit/.done, results/finetuning/alphagenome_pytorch/overfit/overfit/best_model.pth
+    affected files:
+        data/raw/ENA/sf3b1mut/STAR/SRR17111307/second_pass.SJ.rev.tab
+        data/raw/ENA/sf3b1mut/STAR/SRR17111307/second_pass.SJ.fwd.tab

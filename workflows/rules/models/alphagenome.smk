@@ -1,7 +1,8 @@
 FINETUNE_SCRIPT = config["finetuning"]["alphagenome"]["finetune_script"]
 ALPHAGENOME_FOLDS_DIR = config["finetuning"]["alphagenome"]["folds_dir"]
 
-# TODO: rename tracks, train 10 epochs, finetune splicing heads
+# Finetuning supports multiple modalities (rna_seq, atac, etc.) plus splice modalities
+# (splice_site, splice_usage, splice_junctions) trained jointly via comma-separated --modality arg
 
 rule finetune_sf3b1mut:
     wildcard_constraints:
@@ -34,7 +35,8 @@ rule finetune_sf3b1mut:
         done = touch(os.path.join(config["finetuning"]["alphagenome"]["sf3b1mut"]["output_dir"], "{fold}", ".done"))
     params:
         num_gpus = 1, #config["finetuning"]["alphagenome"]["sf3b1mut"]["num_gpus"],
-        modality = config["finetuning"]["alphagenome"]["sf3b1mut"]["modality"],
+        modality_bigwig = config["finetuning"]["alphagenome"]["sf3b1mut"]["modality_bigwig"],
+        modality_splicing = config["finetuning"]["alphagenome"]["sf3b1mut"]["modality_splicing"],
         sequence_length = config["finetuning"]["alphagenome"]["sf3b1mut"]["sequence_length"],
         overlap_highres = config["finetuning"]["alphagenome"]["sf3b1mut"]["overlap_highres"],
         lr = config["finetuning"]["alphagenome"]["sf3b1mut"]["lr"],
@@ -70,9 +72,8 @@ rule finetune_sf3b1mut:
             --num-workers {threads} \
             --mode lora \
             --genome {input.genome} \
-            --modality {params.modality} \
-            --bigwig {input.bigwigs} \
-            --star-junctions {input.star_junctions} \
+            --modality {params.modality_bigwig} --bigwig {input.bigwigs} \
+            --modality {params.modality_splicing} --star-junctions {input.star_junctions} \
             --train-bed {input.train_bed} \
             --val-bed {input.val_bed} \
             --pretrained-weights {params.pretrained_weights} \

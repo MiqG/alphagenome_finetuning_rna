@@ -59,7 +59,8 @@ finetuning:
     sf3b1mut:
       output_dir: "results/finetuning/alphagenome_pytorch/sf3b1mut"
       num_gpus: 4
-      modality: "rna_seq"
+      modality_bigwig: "rna_seq"
+      modality_splicing: "splice_site,splice_usage,splice_junctions"
       sequence_length: 1048576
       overlap_highres: 1024
       lr: 1e-4
