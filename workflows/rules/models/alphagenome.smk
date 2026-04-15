@@ -85,7 +85,6 @@ rule finetune_sf3b1mut:
             --gradient-accumulation-steps {params.gradient_accumulation_steps} \
             --epochs {params.epochs} \
             --output-dir {params.output_dir} \
-            --sequence-parallel \
             --overlap-highres {params.overlap_highres} \
             --sequence-length {params.sequence_length} \
             --track-means-samples {params.track_means_samples} \

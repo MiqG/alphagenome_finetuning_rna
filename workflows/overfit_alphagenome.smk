@@ -18,7 +18,8 @@ configfile: "config/config.yaml"
 
 # Extract dataset paths
 DATA_DIR = config["rnaseq"]["sf3b1mut"]["path"]
-STRANDS = ["forward", "reverse"]
+BIGWIG_STRANDS = ["forward", "reverse"]
+JUNCTION_STRANDS = ["fwd", "rev"]
 
 # Read SAMPLES from metadata TSV (same as sf3b1mut.smk)
 metadata = pd.read_table(config["rnaseq"]["sf3b1mut"]["metadata"])
@@ -66,7 +67,7 @@ rule overfit_sf3b1mut:
                 "second_pass.Aligned.sortedByCoord.out.filtered." + strand + ".bw"
             )
             for sample in OVERFIT_SAMPLES
-            for strand in STRANDS
+            for strand in BIGWIG_STRANDS
         ],
         star_junctions = [
             os.path.join(
@@ -74,7 +75,7 @@ rule overfit_sf3b1mut:
                 "second_pass.SJ." + strand + ".tab"
             )
             for sample in OVERFIT_SAMPLES
-            for strand in ["fwd", "rev"]
+            for strand in JUNCTION_STRANDS
         ],
     output:
         done = touch(os.path.join(OVERFIT_OUTPUT_DIR, "overfit", ".done")),
@@ -131,7 +132,6 @@ rule overfit_sf3b1mut:
             --gradient-accumulation-steps {params.gradient_accumulation_steps} \
             --epochs {params.epochs} \
             --output-dir {params.output_dir} \
-            --sequence-parallel \
             --overlap-highres {params.overlap_highres} \
             --sequence-length {params.sequence_length} \
             --track-means-samples {params.track_means_samples} \
@@ -154,7 +154,7 @@ rule visualize_overfit:
                 "second_pass.Aligned.sortedByCoord.out.filtered." + strand + ".bw"
             )
             for sample in OVERFIT_SAMPLES
-            for strand in STRANDS
+            for strand in BIGWIG_STRANDS
         ],
         star_junctions = [
             os.path.join(
@@ -162,7 +162,7 @@ rule visualize_overfit:
                 "second_pass.SJ." + strand + ".tab"
             )
             for sample in OVERFIT_SAMPLES
-            for strand in ["fwd", "rev"]
+            for strand in JUNCTION_STRANDS
         ],
     output:
         pdf = os.path.join(VIZ_OUTPUT_DIR, "tracks.pdf"),
