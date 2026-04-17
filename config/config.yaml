@@ -5,7 +5,8 @@ paths:
 
 variables:
   CHROMOSOMES: ["chr1", "chr2", "chr3", "chr4", "chr5", "chr6", "chr7", "chr8", "chr9", "chr10", "chr11", "chr12", "chr13", "chr14", "chr15", "chr16", "chr17", "chr18", "chr19", "chr20", "chr21", "chr22", "chrX", "chrY"]
-
+  ALPHAGENOME_FOLDS: ["FOLD_1"]
+  
 # DATASET SPECIFIC
 gencode:
   urls:
@@ -24,9 +25,10 @@ rnaseq:
 
 alphagenome_pytorch:
   urls:
-    weights: "gtca/alphagenome_pytorch"
+    repository: "gtca/alphagenome_pytorch"
+    weights: "model_fold_1.safetensors"
   paths:
-    weights: "data/raw/articles/Avsec2026/alphagenome_pytorch/all-folds"
+    weights: "data/raw/articles/Avsec2026/alphagenome_pytorch/fold-1/model_fold_1.safetensors"
 
 borzoi:
   baskerville_path: "src/baskerville"
@@ -70,3 +72,8 @@ finetuning:
       gradient_accumulation_steps: 8
       track_means_samples: 500  # intervals to sample for track mean estimation (subset for speed)
       save_every_steps: 500
+
+examples:
+  alphagenome:
+    output_dir: "results/examples/alphagenome_pytorch"
+    track_metadata: "data/raw/articles/Avsec2026/alphagenome_pytorch/track_metadata.parquet"

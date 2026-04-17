@@ -22,11 +22,9 @@ rule finetune_sf3b1mut:
         ],
         star_junctions = [
             os.path.join(
-                config["rnaseq"]["sf3b1mut"]["path"], "STAR", sample,
-                "second_pass.SJ.{strand}.tab".format(strand=strand)
+                config["rnaseq"]["sf3b1mut"]["path"], "STAR", sample, "second_pass.SJ.out.tab"
             )
             for sample in [SAMPLES[1], SAMPLES[4]] # DEV
-            for strand in ["fwd", "rev"]
         ],
         bigwig_mapping = os.path.join(
             config["rnaseq"]["sf3b1mut"]["path"], "STAR", "bigwig_mapping-with_mapped_reads.tsv.gz"
@@ -47,9 +45,7 @@ rule finetune_sf3b1mut:
         track_means_samples = config["finetuning"]["alphagenome"]["sf3b1mut"]["track_means_samples"],
         save_every_steps = config["finetuning"]["alphagenome"]["sf3b1mut"]["save_every_steps"],
         output_dir = os.path.join(config["finetuning"]["alphagenome"]["sf3b1mut"]["output_dir"], "{fold}"),
-        pretrained_weights = os.path.join(
-            config["alphagenome_pytorch"]["paths"]["weights"], "model_all_folds.safetensors"
-        ),
+        pretrained_weights = config["alphagenome_pytorch"]["paths"]["weights"]
     threads: 6
     resources:
         gres = "gpu:7g.80gb:1",

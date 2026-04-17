@@ -1,6 +1,3 @@
-ALPHAGENOME_FOLDS = ["FOLD_0", "FOLD_1", "FOLD_2", "FOLD_3"]
-
-
 rule alphagenome_download_sequences_bed:
     """Download Borzoi sequences_human.bed.gz (fold assignments for hg38)."""
     output:
@@ -56,9 +53,10 @@ rule alphagenome_make_folds:
 
 rule download_weights:
     params:
+        repository = config["alphagenome_pytorch"]["urls"]["repository"],
         weights = config["alphagenome_pytorch"]["urls"]["weights"]
     output:
-        weights = directory(config["alphagenome_pytorch"]["paths"]["weights"])
+        weights = config["alphagenome_pytorch"]["paths"]["weights"]
     threads: 1
     resources:
         gres = "none",
@@ -69,7 +67,11 @@ rule download_weights:
         "alphagenome_pytorch"
     shell:
         """
-        hf download {params.weights} model_all_folds.safetensors --local-dir {output.weights}
+        # Create parent directory
+        mkdir -p "$(dirname {output.weights})"
+
+        # Download to parent directory to get file directly (not nested)
+        hf download {params.repository} {params.weights} --local-dir "$(dirname {output.weights})"
 
         echo "Done!"
         """

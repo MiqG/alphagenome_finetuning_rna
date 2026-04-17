@@ -2,9 +2,9 @@
 Standalone Snakefile for AlphaGenome overfitting + visualization debugging.
 
 This workflow is independent of the main pipeline. It:
-1. Creates a minimal 16-interval training set from FOLD_0
-2. Overfits on those 16 intervals (100 epochs, constant LR, no warmup)
-3. Visualizes predictions vs real signals on a multi-page PDF
+1. Creates a minimal 8-interval training set from FOLD_0
+2. Overfits on those 8 intervals (100 epochs, constant LR, no warmup)
+3. Visualizes predictions vs real signals at gene level
 
 Run with:
     snakemake -s workflows/overfit_alphagenome.smk --use-conda
@@ -42,21 +42,21 @@ VIZ_OUTPUT_DIR = os.path.join(OVERFIT_OUTPUT_DIR, "visualization")
 
 rule all:
     input:
-        viz_pdf = os.path.join(VIZ_OUTPUT_DIR, "tracks.pdf"),
+        viz_summary = os.path.join(VIZ_OUTPUT_DIR, "summary_stats.parquet"),
 
 rule create_overfit_bed:
-    """Extract first 16 intervals from FOLD_0/train.bed for overfitting."""
+    """Extract first 8 intervals from FOLD_0/train.bed for overfitting."""
     input:
         fold_train_bed = FOLD_TRAIN_BED,
     output:
         overfit_bed = OVERFIT_BED,
     shell:
         """
-        head -16 {input.fold_train_bed} > {output.overfit_bed}
+        head -8 {input.fold_train_bed} > {output.overfit_bed}
         """
 
 rule overfit_sf3b1mut:
-    """Fine-tune AlphaGenome on 16 intervals to verify training loop."""
+    """Fine-tune AlphaGenome on 8 intervals to verify training loop."""
     input:
         weights = config["alphagenome_pytorch"]["paths"]["weights"],
         genome = config["gencode"]["paths"]["fasta"],
@@ -72,10 +72,9 @@ rule overfit_sf3b1mut:
         star_junctions = [
             os.path.join(
                 DATA_DIR, "STAR", sample,
-                "second_pass.SJ." + strand + ".tab"
+                "second_pass.SJ.out.tab"
             )
             for sample in OVERFIT_SAMPLES
-            for strand in JUNCTION_STRANDS
         ],
     output:
         done = touch(os.path.join(OVERFIT_OUTPUT_DIR, "overfit", ".done")),
@@ -85,23 +84,28 @@ rule overfit_sf3b1mut:
         modality_bigwig = config["finetuning"]["alphagenome"]["sf3b1mut"]["modality_bigwig"],
         modality_splicing = config["finetuning"]["alphagenome"]["sf3b1mut"]["modality_splicing"],
         sequence_length = config["finetuning"]["alphagenome"]["sf3b1mut"]["sequence_length"],
-        overlap_highres = config["finetuning"]["alphagenome"]["sf3b1mut"]["overlap_highres"],
+        overlap_highres = 1024,
         lr = config["finetuning"]["alphagenome"]["sf3b1mut"]["lr"],
-        epochs = 100,
+        epochs = 50,
         batch_size = 1,
         gradient_accumulation_steps = 1,
         track_means_samples = config["finetuning"]["alphagenome"]["sf3b1mut"]["track_means_samples"],
         save_every_steps = 50,
         output_dir = OVERFIT_OUTPUT_DIR,
-        pretrained_weights = os.path.join(
-            config["alphagenome_pytorch"]["paths"]["weights"], "model_all_folds.safetensors"
-        ),
+        pretrained_weights = config["alphagenome_pytorch"]["paths"]["weights"],
+        lora_rank = 32,
+        lora_alpha = 64,
+        lora_targets = "q_proj,k_proj,v_proj,linear_embedding,fc1,fc2",
+        locon_rank = 4,
+        locon_alpha = 1,
+        locon_targets = "encoder.down_blocks,decoder.up_blocks"
     threads: 6
     resources:
         gres = "gpu:7g.80gb:1",
         partition = "gpu",
         runtime = 12*60,  # minutes
-        memory = 80  # G
+        memory = 80,  # G
+        nodelist = "genoa64-09"
     conda:
         "alphagenome_pytorch"
     retries: 0
@@ -117,6 +121,12 @@ rule overfit_sf3b1mut:
         torchrun --nproc_per_node={params.num_gpus} "$FINETUNE_SCRIPT" \
             --num-workers {threads} \
             --mode lora \
+            --lora-rank {params.lora_rank} \
+            --lora-alpha {params.lora_alpha} \
+            --lora-targets {params.lora_targets} \
+            --locon-rank {params.locon_rank} \
+            --locon-alpha {params.locon_alpha} \
+            --locon-targets {params.locon_targets} \
             --genome {input.genome} \
             --modality {params.modality_bigwig} --bigwig {input.bigwigs} \
             --modality {params.modality_splicing} --star-junctions {input.star_junctions} \
@@ -143,11 +153,12 @@ rule overfit_sf3b1mut:
         """
 
 rule visualize_overfit:
-    """Visualize predictions vs real tracks from overfitting."""
+    """Visualize predictions vs real tracks for genes in overfitting intervals."""
     input:
         checkpoint = os.path.join(OVERFIT_OUTPUT_DIR, "overfit", "best_model.pth"),
         overfit_bed = OVERFIT_BED,
         genome = config["gencode"]["paths"]["fasta"],
+        gtf = config["gencode"]["paths"]["gtf"],
         bigwigs = [
             os.path.join(
                 DATA_DIR, "STAR", sample,
@@ -159,13 +170,12 @@ rule visualize_overfit:
         star_junctions = [
             os.path.join(
                 DATA_DIR, "STAR", sample,
-                "second_pass.SJ." + strand + ".tab"
+                "second_pass.SJ.out.tab"
             )
             for sample in OVERFIT_SAMPLES
-            for strand in JUNCTION_STRANDS
         ],
     output:
-        pdf = os.path.join(VIZ_OUTPUT_DIR, "tracks.pdf"),
+        summary = os.path.join(VIZ_OUTPUT_DIR, "summary_stats.parquet"),
     params:
         script = "src/scripts/visualize_overfit.py",
         sequence_length = config["finetuning"]["alphagenome"]["sf3b1mut"]["sequence_length"],
@@ -178,8 +188,9 @@ rule visualize_overfit:
             --checkpoint {input.checkpoint} \
             --bed {input.overfit_bed} \
             --genome {input.genome} \
+            --gtf {input.gtf} \
             --bigwig {input.bigwigs} \
             --star-junctions {input.star_junctions} \
             --sequence-length {params.sequence_length} \
-            --output {output.pdf}
+            --output-dir {VIZ_OUTPUT_DIR}
         """

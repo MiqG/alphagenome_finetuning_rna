@@ -8,6 +8,9 @@ configfile: "config/config.yaml"
 TMP_ROOT = os.path.join(os.path.expanduser("~/scratch"))
 SUPPORT_DIR = "support"
 
+# global variables
+ALPHAGENOME_FOLDS = config["variables"]["ALPHAGENOME_FOLDS"]
+
 # Save params for pandas to_csv
 SAVE_PARAMS = {"sep": "\t", "index": False, "compression": "gzip"}
 
@@ -36,7 +39,7 @@ rule all:
         # ## AlphaGenome finetuning (one done file per fold)
         expand(
             os.path.join(config["finetuning"]["alphagenome"]["sf3b1mut"]["output_dir"], "{fold}", ".done"),
-            fold=ALPHAGENOME_FOLDS[0], # DEV
+            fold=ALPHAGENOME_FOLDS,
         ),
 
         # ## Borzoi finetuning (one done file per replicate)
