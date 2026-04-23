@@ -3,8 +3,25 @@ Standalone Snakefile for AlphaGenome overfitting + visualization debugging.
 
 This workflow is independent of the main pipeline. It:
 1. Creates a minimal 8-interval training set from FOLD_0
-2. Overfits on those 8 intervals (100 epochs, constant LR, no warmup)
+2. Overfits on those 8 intervals (50 epochs, constant LR, no warmup)
+   - All modalities with equal weight (1.0)
+   - Each modality individually (weight 1.0, others 0.0)
+   For each run above, two variants:
+   - normal: initialize output heads with random weights
+   - pretrained: initialize output heads from pretrained model weights
 3. Visualizes predictions vs real signals at gene level
+4. Generates summary plots per initialization strategy
+
+Output structure:
+  {overfit_output_dir}/
+    normal/
+      all/best_model.pth, visualization/summary_stats.parquet, ...
+      {modality}_only/...
+      overfit_summary.pdf
+    pretrained/
+      all/best_model.pth, visualization/summary_stats.parquet, ...
+      {modality}_only/...
+      overfit_summary.pdf
 
 Run with:
     snakemake -s workflows/overfit_alphagenome.smk --use-conda
@@ -38,11 +55,38 @@ ALPHAGENOME_FOLDS_DIR = config["finetuning"]["alphagenome"]["folds_dir"]
 FOLD_TRAIN_BED = os.path.join(ALPHAGENOME_FOLDS_DIR, "FOLD_0", "train.bed")
 OVERFIT_BED = os.path.join("support", "overfit.bed")
 OVERFIT_OUTPUT_DIR = os.path.join(config["finetuning"]["alphagenome"]["sf3b1mut"]["output_dir"].replace("sf3b1mut", "overfit"))
-VIZ_OUTPUT_DIR = os.path.join(OVERFIT_OUTPUT_DIR, "visualization")
+
+# Modality weight configurations: run_name -> weights string
+_MODALITIES = ["rna_seq", "splice_site", "splice_usage", "splice_junctions"]
+OVERFIT_RUNS = {
+    "all": ",".join("{}:1.0".format(m) for m in _MODALITIES),
+    # **{
+    #     "{}_only".format(m): ",".join(
+    #         "{}:{}".format(mod, "1.0" if mod == m else "0.0") for mod in _MODALITIES
+    #     )
+    #     for m in _MODALITIES
+    # },
+}
+
+# Head initialization strategies
+_INIT_STRATEGIES = ["normal", "pretrained"]
+
+# GTF annotation variants
+_GTF_VARIANTS = ["no_gtf", "with_gtf"]
 
 rule all:
     input:
-        viz_summary = os.path.join(VIZ_OUTPUT_DIR, "summary_stats.parquet"),
+        expand(
+            os.path.join(OVERFIT_OUTPUT_DIR, "{gtf_variant}", "{init_strategy}", "{run_name}", "visualization", "summary_stats.parquet"),
+            gtf_variant=_GTF_VARIANTS,
+            init_strategy=_INIT_STRATEGIES,
+            run_name=list(OVERFIT_RUNS.keys()),
+        ),
+        expand(
+            os.path.join(OVERFIT_OUTPUT_DIR, "{gtf_variant}", "{init_strategy}", "overfit_summary.pdf"),
+            gtf_variant=_GTF_VARIANTS,
+            init_strategy=_INIT_STRATEGIES,
+        ),
 
 rule create_overfit_bed:
     """Extract first 8 intervals from FOLD_0/train.bed for overfitting."""
@@ -52,7 +96,7 @@ rule create_overfit_bed:
         overfit_bed = OVERFIT_BED,
     shell:
         """
-        head -8 {input.fold_train_bed} > {output.overfit_bed}
+        head -1 {input.fold_train_bed} > {output.overfit_bed}
         """
 
 rule overfit_sf3b1mut:
@@ -76,29 +120,36 @@ rule overfit_sf3b1mut:
             )
             for sample in OVERFIT_SAMPLES
         ],
+        gtf_parquet = config["gencode"]["paths"]["gtf_parquet"],
     output:
-        done = touch(os.path.join(OVERFIT_OUTPUT_DIR, "overfit", ".done")),
-        checkpoint = os.path.join(OVERFIT_OUTPUT_DIR, "overfit", "best_model.pth"),
+        done = touch(os.path.join(OVERFIT_OUTPUT_DIR, "{gtf_variant}", "{init_strategy}", "{run_name}", ".done")),
+        checkpoint = os.path.join(OVERFIT_OUTPUT_DIR, "{gtf_variant}", "{init_strategy}", "{run_name}", "best_model.pth"),
     params:
         num_gpus = 1,
         modality_bigwig = config["finetuning"]["alphagenome"]["sf3b1mut"]["modality_bigwig"],
         modality_splicing = config["finetuning"]["alphagenome"]["sf3b1mut"]["modality_splicing"],
         sequence_length = config["finetuning"]["alphagenome"]["sf3b1mut"]["sequence_length"],
         overlap_highres = 1024,
-        lr = config["finetuning"]["alphagenome"]["sf3b1mut"]["lr"],
-        epochs = 50,
+        lr = 1e-3,
+        epochs = 100,
         batch_size = 1,
         gradient_accumulation_steps = 1,
         track_means_samples = config["finetuning"]["alphagenome"]["sf3b1mut"]["track_means_samples"],
         save_every_steps = 50,
-        output_dir = OVERFIT_OUTPUT_DIR,
+        output_base = OVERFIT_OUTPUT_DIR,
         pretrained_weights = config["alphagenome_pytorch"]["paths"]["weights"],
-        lora_rank = 32,
-        lora_alpha = 64,
-        lora_targets = "q_proj,k_proj,v_proj,linear_embedding,fc1,fc2",
-        locon_rank = 4,
-        locon_alpha = 1,
-        locon_targets = "encoder.down_blocks,decoder.up_blocks"
+        modality_weights = lambda wildcards: OVERFIT_RUNS[wildcards.run_name],
+        loss_partitions = "rna_seq:8,splice_site:8,splice_usage:8",
+        pretrained_head_arg = lambda wildcards: (
+            "--pretrained-head-samples rna_seq:119,splice_usage:139,splice_junctions:139,splice_site:0 --organism human"
+            if wildcards.init_strategy == "pretrained"
+            else "--pretrained-head-samples rna_seq:NA,splice_usage:NA,splice_junctions:NA,splice_site:NA --organism human"
+        ),
+        gtf_arg = lambda wildcards, input: (
+            "--gtf {}".format(input.gtf_parquet)
+            if wildcards.gtf_variant == "with_gtf"
+            else ""
+        ),
     threads: 6
     resources:
         gres = "gpu:7g.80gb:1",
@@ -118,15 +169,13 @@ rule overfit_sf3b1mut:
         FINETUNE_SCRIPT=$(mktemp /tmp/finetune_XXXXXX.py)
         cp {FINETUNE_SCRIPT} "$FINETUNE_SCRIPT"
 
+        OUTPUT_DIR="{params.output_base}/{wildcards.gtf_variant}/{wildcards.init_strategy}"
+
         torchrun --nproc_per_node={params.num_gpus} "$FINETUNE_SCRIPT" \
             --num-workers {threads} \
-            --mode lora \
-            --lora-rank {params.lora_rank} \
-            --lora-alpha {params.lora_alpha} \
-            --lora-targets {params.lora_targets} \
-            --locon-rank {params.locon_rank} \
-            --locon-alpha {params.locon_alpha} \
-            --locon-targets {params.locon_targets} \
+            --mode linear-probe \
+            --modality-weights "{params.modality_weights}" \
+            --loss-partitions {params.loss_partitions} \
             --genome {input.genome} \
             --modality {params.modality_bigwig} --bigwig {input.bigwigs} \
             --modality {params.modality_splicing} --star-junctions {input.star_junctions} \
@@ -141,24 +190,32 @@ rule overfit_sf3b1mut:
             --batch-size {params.batch_size} \
             --gradient-accumulation-steps {params.gradient_accumulation_steps} \
             --epochs {params.epochs} \
-            --output-dir {params.output_dir} \
-            --overlap-highres {params.overlap_highres} \
+            --output-dir "$OUTPUT_DIR" \
             --sequence-length {params.sequence_length} \
             --track-means-samples {params.track_means_samples} \
             --save-every-steps {params.save_every_steps} \
-            --run-name overfit
+            --run-name {wildcards.run_name} \
+            --max-grad-norm inf \
+            --seed 1234 \
+            {params.pretrained_head_arg} \
+            {params.gtf_arg}
 
         rm -f "$FINETUNE_SCRIPT"
+
+        # Remove intermediate checkpoints, keep only best_model.pth
+        find "$OUTPUT_DIR/{wildcards.run_name}" -name "*.pth" ! -name "best_model.pth" -delete
+
         echo "Overfitting complete!"
         """
 
 rule visualize_overfit:
     """Visualize predictions vs real tracks for genes in overfitting intervals."""
     input:
-        checkpoint = os.path.join(OVERFIT_OUTPUT_DIR, "overfit", "best_model.pth"),
+        checkpoint = os.path.join(OVERFIT_OUTPUT_DIR, "{gtf_variant}", "{init_strategy}", "{run_name}", "best_model.pth"),
         overfit_bed = OVERFIT_BED,
         genome = config["gencode"]["paths"]["fasta"],
         gtf = config["gencode"]["paths"]["gtf"],
+        gtf_parquet = config["gencode"]["paths"]["gtf_parquet"],
         bigwigs = [
             os.path.join(
                 DATA_DIR, "STAR", sample,
@@ -175,15 +232,21 @@ rule visualize_overfit:
             for sample in OVERFIT_SAMPLES
         ],
     output:
-        summary = os.path.join(VIZ_OUTPUT_DIR, "summary_stats.parquet"),
+        summary = os.path.join(OVERFIT_OUTPUT_DIR, "{gtf_variant}", "{init_strategy}", "{run_name}", "visualization", "summary_stats.parquet"),
     params:
         script = "src/scripts/visualize_overfit.py",
         sequence_length = config["finetuning"]["alphagenome"]["sf3b1mut"]["sequence_length"],
+        viz_dir = lambda wildcards: os.path.join(OVERFIT_OUTPUT_DIR, wildcards.gtf_variant, wildcards.init_strategy, wildcards.run_name, "visualization"),
+        gtf_arg = lambda wildcards, input: (
+            "--gtf-splice-sites {}".format(input.gtf_parquet)
+            if wildcards.gtf_variant == "with_gtf"
+            else ""
+        ),
     conda:
         "alphagenome_pytorch"
     shell:
         """
-        mkdir -p {VIZ_OUTPUT_DIR}
+        mkdir -p {params.viz_dir}
         python {params.script} \
             --checkpoint {input.checkpoint} \
             --bed {input.overfit_bed} \
@@ -192,5 +255,27 @@ rule visualize_overfit:
             --bigwig {input.bigwigs} \
             --star-junctions {input.star_junctions} \
             --sequence-length {params.sequence_length} \
-            --output-dir {VIZ_OUTPUT_DIR}
+            --output-dir {params.viz_dir} \
+            {params.gtf_arg}
+        """
+
+rule plot_overfit_summary:
+    """Plot training dynamics and final prediction correlations across all overfit runs."""
+    input:
+        summaries = expand(
+            os.path.join(OVERFIT_OUTPUT_DIR, "{{gtf_variant}}", "{{init_strategy}}", "{run_name}", "visualization", "summary_stats.parquet"),
+            run_name=list(OVERFIT_RUNS.keys()),
+        ),
+    output:
+        pdf = os.path.join(OVERFIT_OUTPUT_DIR, "{gtf_variant}", "{init_strategy}", "overfit_summary.pdf"),
+    params:
+        script = "src/scripts/plot_overfit_summary.py",
+        run_dirs = lambda wildcards: [os.path.join(OVERFIT_OUTPUT_DIR, wildcards.gtf_variant, wildcards.init_strategy, run_name) for run_name in OVERFIT_RUNS.keys()],
+    conda:
+        "alphagenome_pytorch"
+    shell:
+        """
+        python {params.script} \
+            --run-dirs {params.run_dirs} \
+            --output {output.pdf}
         """

@@ -625,10 +625,10 @@ def main():
                         jc_fwd = pred_counts[:, :, s_idx] if pred_counts.shape[2] > s_idx else pred_counts[:, :, :n_tissues].sum(axis=2)
                         d_genomic_all = pssp[0] + padded_start
                         a_genomic_all = pssp[1] + padded_start
-                        in_gene_d = (d_genomic_all >= gene_start) & (d_genomic_all < gene_end)
-                        in_gene_a = (a_genomic_all >= gene_start) & (a_genomic_all < gene_end)
-                        for di in np.where(in_gene_d)[0]:
-                            for ai in np.where(in_gene_a)[0]:
+                        valid_d = (pssp[0] >= 0) & (d_genomic_all >= gene_start) & (d_genomic_all < gene_end)
+                        valid_a = (pssp[1] >= 0) & (a_genomic_all >= gene_start) & (a_genomic_all < gene_end)
+                        for di in np.where(valid_d)[0]:
+                            for ai in np.where(valid_a)[0]:
                                 cnt = float(jc_fwd[di, ai])
                                 if cnt > 0:
                                     pred_junctions.append((d_genomic_all[di], a_genomic_all[ai], cnt))
