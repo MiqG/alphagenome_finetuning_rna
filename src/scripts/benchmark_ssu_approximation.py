@@ -2,13 +2,14 @@
 """Benchmark junction-only SSU approximation against BAM-derived ground truth.
 
 Computes, for each splice site in a genomic interval:
-  - SSU full  = α / (α + β1 + β2)   [SpliSER definition, requires BAM]
-  - SSU approx = α / (α + β2)        [junction-only, no BAM needed]
+  - SSU full     = α / (α + β1 + β2)   [α/β2 from junctions, β1 from BAM]
+  - SSU approx   = α / (α + β2)        [junction-only, no BAM needed]
+  - SSU spliser  = α / (α + β1 + β2)   [all counts from BAM, equivalent to SpliSER]
 
 where:
-  α  = split reads using this site (from SJ.out.tab)
+  α  = split reads using this site
   β1 = reads spanning the site continuously without splicing (from BAM)
-  β2 = reads using a competing site for the same partner (from junction data)
+  β2 = reads using a competing site for the same partner
 
 Outputs:
   ssu_comparison.parquet  — one row per splice site
@@ -26,8 +27,12 @@ from __future__ import annotations
 
 import argparse
 import bisect
+import contextlib
+import json
 import os
 import sys
+import time
+import tracemalloc
 from pathlib import Path
 
 import matplotlib
@@ -177,7 +182,7 @@ def compute_alpha_beta2(
 
 
 # ------------------------------------------------------------------ #
-# Step 4: β1 from BAM
+# Step 4: β1 from BAM (junction-based α/β2 variant)
 # ------------------------------------------------------------------ #
 
 def build_beta1_counts(
@@ -265,6 +270,234 @@ def build_beta1_counts(
 
 
 # ------------------------------------------------------------------ #
+# SpliSER-equivalent: α, β1, β2 all from BAM (single pass)
+# ------------------------------------------------------------------ #
+
+def _check_strand_from_flag(flag: int, strandedType: str = "rf") -> str | None:
+    """Determine transcript strand from SAM flag bits (mirrors SpliSER check_strand).
+
+    strType='rf': R2-sense library (dUTP/TruSeq) — same convention as
+    tagXSstrandedData.awk -v strType=2.
+    """
+    is_paired   = bool(flag & 0x1)
+    is_reverse  = bool(flag & 0x10)
+    is_read1    = bool(flag & 0x40)
+
+    if not is_paired:
+        mate = 1
+    elif is_read1:
+        mate = 1
+    else:
+        mate = 2
+
+    if strandedType == "rf":
+        # R1 antisense → R1 reverse = transcript +; R1 forward = transcript -
+        if mate == 1:
+            return "+" if is_reverse else "-"
+        else:
+            return "-" if is_reverse else "+"
+    elif strandedType == "fr":
+        if mate == 1:
+            return "-" if is_reverse else "+"
+        else:
+            return "+" if is_reverse else "-"
+    return None
+
+
+def compute_spliser_counts(
+    bam_path: str,
+    chrom: str,
+    start_0: int,
+    end_0: int,
+    mapq_min: int = 30,
+    strandedType: str = "rf",
+) -> pd.DataFrame:
+    """Compute SpliSER-equivalent α, β1, β2 for all splice sites in the region.
+
+    Single BAM pass — equivalent efficiency to build_beta1_counts.
+
+    α:  from bam.find_introns() per strand (counts each SAM record independently,
+        matching SpliSER behaviour for paired-end reads).
+    β1: reads continuously spanning the splice site position (no N CIGAR at
+        targetPos), where targetPos is:
+          donors    — first intron base (0-based)  = i[0] from find_introns
+          acceptors — first right-exon base (0-based) = i[1] from find_introns
+    β2: reads whose any intron strictly spans targetPos (l < targetPos < r),
+        i.e. a longer competing junction that contains this splice site.
+
+    Strand detection uses SAM flag bits (rf mode), matching SpliSER's
+    check_strand() — not the XS tag.
+
+    Returns a DataFrame with columns:
+        chrom, position, strand, role,
+        alpha_bam, beta1_bam, beta2_bam, ssu_spliser
+    using the same 1-based exon position convention as assemble_site_table so
+    the two tables merge cleanly on (chrom, position, strand, role).
+    """
+    try:
+        import pysam
+    except ImportError as e:
+        raise ImportError("pysam is required") from e
+
+    bam = pysam.AlignmentFile(bam_path, "rb")
+
+    # ── Step A: alpha from find_introns (one pass per strand) ──────────
+    # donor_alpha_bam  keyed by (i[0], strand)  — i[0] = 0-based intron start
+    # acceptor_alpha_bam keyed by (i[1], strand) — i[1] = 0-based intron end excl
+    donor_alpha_bam:    dict[tuple[int, str], int] = {}
+    acceptor_alpha_bam: dict[tuple[int, str], int] = {}
+
+    for strand in ("+", "-"):
+        gen = (
+            r for r in bam.fetch(chrom, start_0, end_0)
+            if not r.is_unmapped
+            and not r.is_secondary
+            and not r.is_supplementary
+            and r.mapping_quality >= mapq_min
+            and _check_strand_from_flag(r.flag, strandedType) == strand
+        )
+        for (iv_s, iv_e), count in bam.find_introns(gen).items():
+            if iv_s < start_0 or iv_e > end_0:
+                continue
+            donor_alpha_bam[(iv_s, strand)]    = donor_alpha_bam.get((iv_s, strand), 0)    + count
+            acceptor_alpha_bam[(iv_e, strand)] = acceptor_alpha_bam.get((iv_e, strand), 0) + count
+
+    # Build sorted lists of targetPos per strand for binary search.
+    # SpliSER targetPos convention (0-based):
+    #   donors:    iv_s       (first intron base)
+    #   acceptors: iv_e - 1   (last intron base — NOT the first right-exon base)
+    # Using last intron base for acceptors is critical: correctly-spliced reads
+    # have an intron [x, iv_e) that covers iv_e-1, so they are NOT counted as β1.
+    # If we used iv_e (first right-exon base) instead, every spliced read would
+    # pass the "no intron covers targetPos" check and inflate β1.
+    donor_targets:    dict[str, list[int]] = {"+": [], "-": []}
+    acceptor_targets: dict[str, list[int]] = {"+": [], "-": []}
+    for (pos, strand) in donor_alpha_bam:
+        donor_targets[strand].append(pos)           # targetPos = iv_s
+    for (pos, strand) in acceptor_alpha_bam:
+        acceptor_targets[strand].append(pos - 1)    # targetPos = iv_e - 1
+    for strand in ("+", "-"):
+        donor_targets[strand].sort()
+        acceptor_targets[strand].sort()
+
+    # Merged sorted list of all target positions for fast overlap search.
+    # acceptor_scan_to_alpha maps scan targetPos (iv_e-1) back to alpha key (iv_e).
+    all_targets: dict[str, list[int]] = {}
+    target_roles: dict[str, dict[int, list[str]]] = {}  # strand → pos → ['donor'|'acceptor']
+    acceptor_scan_to_alpha: dict[tuple[int, str], int] = {}  # (scan_pos, strand) → iv_e
+    for strand in ("+", "-"):
+        pos_set: dict[int, list[str]] = {}
+        for p in donor_targets[strand]:
+            pos_set.setdefault(p, []).append("donor")
+        for p in acceptor_targets[strand]:
+            pos_set.setdefault(p, []).append("acceptor")
+        all_targets[strand] = sorted(pos_set)
+        target_roles[strand] = pos_set
+    for (iv_e, strand) in acceptor_alpha_bam:
+        acceptor_scan_to_alpha[(iv_e - 1, strand)] = iv_e
+
+    # ── Step B: β1 and β2 in a single region pass ─────────────────────
+    beta1_bam: dict[tuple[int, str, str], int] = {}  # (pos, strand, role) → count
+    beta2_bam: dict[tuple[int, str, str], int] = {}
+
+    for read in bam.fetch(chrom, start_0, end_0):
+        if read.is_unmapped or read.is_secondary or read.is_supplementary:
+            continue
+        if read.mapping_quality < mapq_min:
+            continue
+        if not read.cigartuples:
+            continue
+
+        read_strand = _check_strand_from_flag(read.flag, strandedType)
+        if read_strand not in ("+", "-"):
+            continue
+
+        # Collect intron intervals for this read (N CIGAR ops, 0-based half-open)
+        introns: list[tuple[int, int]] = []
+        ref_pos = read.reference_start
+        for op, length in read.cigartuples:
+            if op == 3:
+                introns.append((ref_pos, ref_pos + length))
+                ref_pos += length
+            elif op in (0, 2, 7, 8):
+                ref_pos += length
+
+        read_start = read.reference_start
+        read_end   = read.reference_end  # 0-based exclusive
+
+        targets = all_targets[read_strand]
+        lo = bisect.bisect_left(targets, read_start)
+        hi = bisect.bisect_right(targets, read_end - 1)
+
+        for target_pos in targets[lo:hi]:
+            for role in target_roles[read_strand][target_pos]:
+                key = (target_pos, read_strand, role)
+
+                # β1: read continuously spans target_pos (no intron covers it)
+                if not any(iv_s <= target_pos < iv_e for iv_s, iv_e in introns):
+                    beta1_bam[key] = beta1_bam.get(key, 0) + 1
+
+                # β2: competing intron strictly spans target_pos.
+                # For donors:    alpha intron starts at target_pos → iv_s == target_pos,
+                #                so iv_s < target_pos is False → alpha excluded naturally.
+                # For acceptors: alpha intron ends at target_pos+1 (iv_e = targetPos+1),
+                #                which satisfies iv_s < target_pos < iv_e, so we must
+                #                explicitly skip reads that use the site's own intron
+                #                (i.e., alpha reads), matching SpliSER's α-priority logic.
+                if role == "acceptor":
+                    is_alpha = any(iv_e_r == target_pos + 1 for _, iv_e_r in introns)
+                    if not is_alpha and any(iv_s < target_pos < iv_e for iv_s, iv_e in introns):
+                        beta2_bam[key] = beta2_bam.get(key, 0) + 1
+                else:
+                    if any(iv_s < target_pos < iv_e for iv_s, iv_e in introns):
+                        beta2_bam[key] = beta2_bam.get(key, 0) + 1
+
+    bam.close()
+
+    # ── Step C: assemble output DataFrame ─────────────────────────────
+    # Convert back to 1-based exon position convention (matching assemble_site_table):
+    #   donor    position = iv_s      (= exon_start, 1-based last exon base)
+    #   acceptor position = iv_e + 1  (= exon_end,   1-based first exon base)
+    # β1/β2 for acceptors were stored with scan key (iv_e - 1), so look up with pos - 1.
+    rows = []
+    for (pos, strand), alpha in donor_alpha_bam.items():
+        key  = (pos, strand, "donor")
+        b1   = beta1_bam.get(key, 0)
+        b2   = beta2_bam.get(key, 0)
+        denom = alpha + b1 + b2
+        rows.append({
+            "chrom":       chrom,
+            "position":    pos,          # = exon_start (our 1-based convention)
+            "strand":      strand,
+            "role":        "donor",
+            "alpha_bam":   int(alpha),
+            "beta1_bam":   int(b1),
+            "beta2_bam":   int(b2),
+            "ssu_spliser": alpha / denom if denom > 0 else float("nan"),
+        })
+    for (pos, strand), alpha in acceptor_alpha_bam.items():
+        scan_key = (pos - 1, strand, "acceptor")  # targetPos = iv_e - 1
+        b1   = beta1_bam.get(scan_key, 0)
+        b2   = beta2_bam.get(scan_key, 0)
+        denom = alpha + b1 + b2
+        rows.append({
+            "chrom":       chrom,
+            "position":    pos + 1,      # = exon_end (our 1-based convention)
+            "strand":      strand,
+            "role":        "acceptor",
+            "alpha_bam":   int(alpha),
+            "beta1_bam":   int(b1),
+            "beta2_bam":   int(b2),
+            "ssu_spliser": alpha / denom if denom > 0 else float("nan"),
+        })
+
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+    return df.drop_duplicates(subset=["chrom", "position", "strand", "role"]).reset_index(drop=True)
+
+
+# ------------------------------------------------------------------ #
 # Step 5: assemble site table
 # ------------------------------------------------------------------ #
 
@@ -324,7 +557,22 @@ def assemble_site_table(
 # Step 7: scatterplot
 # ------------------------------------------------------------------ #
 
-def plot_scatterplot(df: pd.DataFrame, out_path: Path) -> None:
+def _timing_text(timing: dict) -> str:
+    """Format timing dict as a multi-line string for figure annotations."""
+    lines = ["Compute time / peak mem:"]
+    short = {
+        "ssu_full/approx — alpha+beta2 (junctions)": "α+β2 junctions",
+        "ssu_full — beta1 (BAM scan)":               "β1 BAM scan",
+        "ssu_spliser — alpha+beta1+beta2 (BAM scan)": "ssu_spliser BAM",
+    }
+    for key, entry in timing.items():
+        label = short.get(key, key)
+        lines.append(f"  {label}: {entry['seconds']:.1f}s / {entry['peak_mb']:.1f} MB")
+    return "\n".join(lines)
+
+
+def plot_scatterplot(df: pd.DataFrame, out_path: Path,
+                     timing: dict | None = None) -> None:
     """2×2 scatter of ssu_full vs ssu_approx, faceted by strand and role."""
     strands = ["+", "-"]
     roles   = ["donor", "acceptor"]
@@ -391,6 +639,13 @@ def plot_scatterplot(df: pd.DataFrame, out_path: Path) -> None:
     if sc_ref is not None:
         fig.colorbar(sc_ref, ax=axes, label="log10(α + 1)", shrink=0.55, pad=0.02)
 
+    if timing:
+        fig.text(
+            0.01, 0.01, _timing_text(timing),
+            fontsize=7, va="bottom", ha="left", family="monospace",
+            bbox=dict(boxstyle="round,pad=0.4", fc="lightyellow", alpha=0.85),
+        )
+
     fig.savefig(out_path, bbox_inches="tight")
     plt.close(fig)
     print(f"  wrote {out_path}")
@@ -399,6 +654,21 @@ def plot_scatterplot(df: pd.DataFrame, out_path: Path) -> None:
 # ------------------------------------------------------------------ #
 # Main
 # ------------------------------------------------------------------ #
+
+@contextlib.contextmanager
+def _timed(label: str, accumulator: dict):
+    """Time a block and accumulate elapsed seconds and peak memory into accumulator[label]."""
+    tracemalloc.start()
+    t0 = time.perf_counter()
+    yield
+    elapsed = time.perf_counter() - t0
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    entry = accumulator.setdefault(label, {"seconds": 0.0, "peak_mb": 0.0})
+    entry["seconds"] += elapsed
+    entry["peak_mb"] = max(entry["peak_mb"], peak / 1e6)
+    print(f"    [{label}]  {elapsed:.2f}s  peak_mem={peak/1e6:.1f} MB")
+
 
 def main() -> None:
     args = parse_args()
@@ -414,6 +684,7 @@ def main() -> None:
     print(f"  {len(all_junctions)} junctions after quality filtering")
 
     all_frames: list[pd.DataFrame] = []
+    timing: dict = {}
 
     for chrom, start_0, end_0 in intervals:
         region = f"{chrom}:{start_0 + 1}-{end_0}"
@@ -426,8 +697,9 @@ def main() -> None:
             print("  no junctions — skipping interval")
             continue
 
-        # Steps 2–3: α and β2
-        donor_alpha, acceptor_alpha, donor_beta2, acceptor_beta2 = compute_alpha_beta2(junctions)
+        # Steps 2–3: α and β2 from junction file
+        with _timed("ssu_full/approx — alpha+beta2 (junctions)", timing):
+            donor_alpha, acceptor_alpha, donor_beta2, acceptor_beta2 = compute_alpha_beta2(junctions)
         n_donors    = len(donor_alpha)
         n_acceptors = len(acceptor_alpha)
         print(f"  {n_donors} donor sites, {n_acceptors} acceptor sites")
@@ -448,16 +720,35 @@ def main() -> None:
                 site_strands.setdefault(p0, set()).add(strand)
 
         print(f"  computing β1 for {len(sites_0based)} positions from BAM …")
-        beta1_counts = build_beta1_counts(
-            args.bam, chrom, start_0, end_0, sites_0based, site_strands, args.mapq
-        )
+        with _timed("ssu_full — beta1 (BAM scan)", timing):
+            beta1_counts = build_beta1_counts(
+                args.bam, chrom, start_0, end_0, sites_0based, site_strands, args.mapq
+            )
         total_b1 = sum(beta1_counts.values())
         print(f"  total β1 reads counted: {total_b1}")
 
-        # Step 5: assemble
+        # Step 5: assemble junction-based SSU table
         df_interval = assemble_site_table(
             donor_alpha, acceptor_alpha, donor_beta2, acceptor_beta2, beta1_counts
         )
+
+        # Step 5b: SpliSER-equivalent BAM-only counts
+        print(f"  computing ssu_spliser (BAM-only α/β1/β2) …")
+        with _timed("ssu_spliser — alpha+beta1+beta2 (BAM scan)", timing):
+            df_spliser = compute_spliser_counts(
+                args.bam, chrom, start_0, end_0, mapq_min=args.mapq
+            )
+        if not df_spliser.empty:
+            df_interval = df_interval.merge(
+                df_spliser[["chrom", "position", "strand", "role",
+                            "alpha_bam", "beta1_bam", "beta2_bam", "ssu_spliser"]],
+                on=["chrom", "position", "strand", "role"],
+                how="left",
+            )
+        else:
+            for col in ("alpha_bam", "beta1_bam", "beta2_bam", "ssu_spliser"):
+                df_interval[col] = float("nan")
+
         all_frames.append(df_interval)
 
     if not all_frames:
@@ -477,8 +768,14 @@ def main() -> None:
     df.to_parquet(parquet_path, index=False)
     print(f"  wrote {parquet_path}")
 
+    # Write timing summary for downstream scripts
+    timing_path = out_dir / "timing.json"
+    with open(timing_path, "w") as fh:
+        json.dump(timing, fh, indent=2)
+    print(f"  wrote {timing_path}")
+
     # Step 7: scatterplot
-    plot_scatterplot(df, out_dir / "ssu_scatterplot.pdf")
+    plot_scatterplot(df, out_dir / "ssu_scatterplot.pdf", timing=timing)
 
 
 if __name__ == "__main__":

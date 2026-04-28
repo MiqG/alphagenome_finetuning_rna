@@ -30,6 +30,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from pathlib import Path
 
@@ -134,17 +135,30 @@ def scatter_pair(ax, x, y, color_vals, vmax, xlabel, ylabel, title):
     return sc
 
 
-def plot_comparison(df: pd.DataFrame, out_path: Path) -> None:
-    """3×2 grid: rows = donor/acceptor, cols = SpliSER vs ssu_full / SpliSER vs ssu_approx / ssu_full vs ssu_approx."""
+def plot_comparison(df: pd.DataFrame, out_path: Path,
+                    timing: dict | None = None) -> None:
+    """4×2 grid: rows = donor/acceptor, cols = SSE vs ssu_spliser / SSE vs ssu_full / SSE vs ssu_approx / ssu_spliser vs ssu_full."""
     roles = ["donor", "acceptor"]
     comparisons = [
-        ("sse", "ssu_full",   "SpliSER SSE", "ssu_full (BAM β1, junc β2)"),
-        ("sse", "ssu_approx", "SpliSER SSE", "ssu_approx (junc-only)"),
-        ("ssu_full", "ssu_approx", "ssu_full", "ssu_approx"),
+        ("sse", "ssu_spliser", "SpliSER SSE", "ssu_spliser (BAM-only)"),
+        ("sse", "ssu_full",    "SpliSER SSE", "ssu_full (BAM β1, junc β2)"),
+        ("sse", "ssu_approx",  "SpliSER SSE", "ssu_approx (junc-only)"),
+        ("ssu_spliser", "ssu_full", "ssu_spliser", "ssu_full"),
     ]
 
-    fig, axes = plt.subplots(2, 3, figsize=(14, 9), sharex=False, sharey=False)
-    fig.suptitle("SpliSER SSE vs junction-based SSU approximations", fontsize=12)
+    has_spliser_col = "ssu_spliser" in df.columns and df["ssu_spliser"].notna().any()
+    if not has_spliser_col:
+        comparisons = comparisons[1:]   # drop ssu_spliser columns if missing
+
+    ncols = len(comparisons)
+    fig, axes = plt.subplots(2, ncols, figsize=(5 * ncols, 9), sharex=False, sharey=False)
+    if ncols == 1:
+        axes = axes[:, np.newaxis]
+    fig.suptitle("SpliSER SSE vs SSU approximations", fontsize=12)
+
+    dropna_cols = ["sse", "ssu_full", "ssu_approx"]
+    if has_spliser_col:
+        dropna_cols.append("ssu_spliser")
 
     vmax = float(np.log10(df["alpha"].max() + 1)) if not df.empty else 1.0
     sc_ref = None
@@ -155,13 +169,15 @@ def plot_comparison(df: pd.DataFrame, out_path: Path) -> None:
 
         for col_i, (xcol, ycol, xlabel, ylabel) in enumerate(comparisons):
             ax = axes[row_i][col_i]
-            if not sub.empty:
+            sub_pair = sub.dropna(subset=[xcol, ycol])
+            if not sub_pair.empty:
+                cv = np.log10(sub_pair["alpha"].values + 1)
                 sc = scatter_pair(
                     ax,
-                    sub[xcol].values, sub[ycol].values,
-                    color_vals, vmax,
+                    sub_pair[xcol].values, sub_pair[ycol].values,
+                    cv, vmax,
                     xlabel, ylabel,
-                    f"{role}  (N={len(sub)})",
+                    f"{role}  (N={len(sub_pair)})",
                 )
                 if sc is not None:
                     sc_ref = sc
@@ -172,6 +188,22 @@ def plot_comparison(df: pd.DataFrame, out_path: Path) -> None:
 
     if sc_ref is not None:
         fig.colorbar(sc_ref, ax=axes, label="log10(α + 1)", shrink=0.5, pad=0.02)
+
+    if timing:
+        short = {
+            "ssu_full/approx — alpha+beta2 (junctions)": "α+β2 junctions",
+            "ssu_full — beta1 (BAM scan)":               "β1 BAM scan",
+            "ssu_spliser — alpha+beta1+beta2 (BAM scan)": "ssu_spliser BAM",
+        }
+        lines = ["Compute time / peak mem:"]
+        for key, entry in timing.items():
+            label = short.get(key, key)
+            lines.append(f"  {label}: {entry['seconds']:.1f}s / {entry['peak_mb']:.1f} MB")
+        fig.text(
+            0.01, 0.01, "\n".join(lines),
+            fontsize=7, va="bottom", ha="left", family="monospace",
+            bbox=dict(boxstyle="round,pad=0.4", fc="lightyellow", alpha=0.85),
+        )
 
     fig.tight_layout()
     fig.savefig(out_path, bbox_inches="tight")
@@ -212,7 +244,10 @@ def main() -> None:
     merged.to_parquet(parquet_path, index=False)
     print(f"  wrote {parquet_path}")
 
-    plot_comparison(merged, out_dir / "spliser_vs_ssu_scatterplot.pdf")
+    timing_path = Path(args.ssu).parent / "timing.json"
+    timing = json.loads(timing_path.read_text()) if timing_path.exists() else None
+
+    plot_comparison(merged, out_dir / "spliser_vs_ssu_scatterplot.pdf", timing=timing)
 
 
 if __name__ == "__main__":
