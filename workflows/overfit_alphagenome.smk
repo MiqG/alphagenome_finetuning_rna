@@ -2,7 +2,7 @@
 Standalone Snakefile for AlphaGenome overfitting + visualization debugging.
 
 This workflow is independent of the main pipeline. It:
-1. Creates a minimal 8-interval training set from FOLD_0
+1. Creates a minimal 8-interval training set from FOLD_1
 2. Overfits on those 8 intervals (50 epochs, constant LR, no warmup)
    - All modalities with equal weight (1.0)
    - Each modality individually (weight 1.0, others 0.0)
@@ -52,20 +52,20 @@ OVERFIT_SAMPLES = ["SRR17111301", "SRR17111311"]
 # Paths
 FINETUNE_SCRIPT = config["finetuning"]["alphagenome"]["finetune_script"]
 ALPHAGENOME_FOLDS_DIR = config["finetuning"]["alphagenome"]["folds_dir"]
-FOLD_TRAIN_BED = os.path.join(ALPHAGENOME_FOLDS_DIR, "FOLD_0", "train.bed")
+FOLD_TRAIN_BED = os.path.join(ALPHAGENOME_FOLDS_DIR, "FOLD_1", "train.bed")
 OVERFIT_BED = os.path.join("support", "overfit.bed")
 OVERFIT_OUTPUT_DIR = os.path.join(config["finetuning"]["alphagenome"]["sf3b1mut"]["output_dir"].replace("sf3b1mut", "overfit"))
 
 # Modality weight configurations: run_name -> weights string
-_MODALITIES = ["rna_seq", "splice_site", "splice_usage", "splice_junctions"]
+_MODALITIES = ["splice_site"]#["rna_seq", "splice_site", "splice_usage", "splice_junctions"]
 OVERFIT_RUNS = {
     "all": ",".join("{}:1.0".format(m) for m in _MODALITIES),
-    # **{
-    #     "{}_only".format(m): ",".join(
-    #         "{}:{}".format(mod, "1.0" if mod == m else "0.0") for mod in _MODALITIES
-    #     )
-    #     for m in _MODALITIES
-    # },
+    **{
+        "{}_only".format(m): ",".join(
+            "{}:{}".format(mod, "1.0" if mod == m else "0.0") for mod in _MODALITIES
+        )
+        for m in _MODALITIES
+    },
 }
 
 # Head initialization strategies
@@ -89,7 +89,7 @@ rule all:
         ),
 
 rule create_overfit_bed:
-    """Extract first 8 intervals from FOLD_0/train.bed for overfitting."""
+    """Extract first 8 intervals from FOLD_1/train.bed for overfitting."""
     input:
         fold_train_bed = FOLD_TRAIN_BED,
     output:
@@ -131,7 +131,7 @@ rule overfit_sf3b1mut:
         sequence_length = config["finetuning"]["alphagenome"]["sf3b1mut"]["sequence_length"],
         overlap_highres = 1024,
         lr = 1e-3,
-        epochs = 100,
+        epochs = 100, 
         batch_size = 1,
         gradient_accumulation_steps = 1,
         track_means_samples = config["finetuning"]["alphagenome"]["sf3b1mut"]["track_means_samples"],

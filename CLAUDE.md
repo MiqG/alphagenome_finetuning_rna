@@ -88,7 +88,7 @@ Multi-step pipeline following the baskerville transfer learning tutorial:
 
 ## Conda environments
 
-Defined in `workflows/envs/`. All `conda:` directives in rule files use relative yaml paths (e.g. `"../envs/general.yaml"`), not bare env names.
+Defined in `workflows/envs/`. All `conda:` directives in rule files use bare env names (e.g. `"alphagenome_finetuning_rna"`), not yaml file paths.
 
 | File | Env name | Used for |
 |------|----------|----------|

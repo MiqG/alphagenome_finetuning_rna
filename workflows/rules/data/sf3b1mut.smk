@@ -197,25 +197,68 @@ rule star_second_pass:
         echo "Done!"
         """
 
-rule star_split_junctions:
-    """Split second-pass STAR SJ.out.tab into strand-specific files.
+rule star_paper_pass:
+    """Single-pass STAR alignment replicating the AlphaGenome paper settings.
 
-    Column 4 of SJ.out.tab encodes strand: 1 = forward (+), 2 = reverse (-).
-    Undefined-strand junctions (0) are discarded.
+    Differences vs our two-pass pipeline:
+    - Single pass (no pre-collected junctions)
+    - --outSAMstrandField intronMotif  (strand from splice dinucleotide, as in paper)
+    - --outSAMunmapped Within
+    - No --outFilterType BySJout
+    - No --quantMode
     """
     input:
-        align_done = os.path.join(DATA_DIR, "STAR", ".done_align_second", "{sample}"),
-    output:
-        fwd = os.path.join(DATA_DIR, "STAR", "{sample}", "second_pass.SJ.fwd.tab"),
-        rev = os.path.join(DATA_DIR, "STAR", "{sample}", "second_pass.SJ.rev.tab"),
+        download_done = [os.path.join(DATA_DIR,"fastqs",".done","{sample}_{end}").format(end=end, sample="{sample}") for end in ENDS],
+        genome_dir = config["gencode"]["paths"]["star_index"],
     params:
-        sj = os.path.join(DATA_DIR, "STAR", "{sample}", "second_pass.SJ.out.tab"),
+        sample = "{sample}",
+        fastqs_dir = os.path.join(DATA_DIR,"fastqs"),
+        output_dir = os.path.join(DATA_DIR,"STAR","{sample}"),
+        tmp_dir = os.path.join(TMP_ROOT,"sf3b1mut_paper","{sample}"),
+        memory_limit = 20000000000,
+    output:
+        align_done = touch(os.path.join(DATA_DIR,"STAR",".done_align_paper","{sample}")),
+    threads: 6
+    resources:
+        gres = "none",
+        partition = "genoa64",
+        runtime = 6*60,
+        memory = 40,
     conda:
         "alphagenome_finetuning_rna"
     shell:
         """
-        awk '$4 == 1' {params.sj} > {output.fwd}
-        awk '$4 == 2' {params.sj} > {output.rev}
+        set -eo pipefail
+
+        if [ -d {params.tmp_dir} ]; then
+          rm -r {params.tmp_dir}
+        fi
+
+        STAR \
+            --genomeDir {input.genome_dir} \
+            --genomeLoad NoSharedMemory \
+            --readFilesIn {params.fastqs_dir}/{params.sample}_1.fastq.gz {params.fastqs_dir}/{params.sample}_2.fastq.gz \
+            --readFilesCommand "pigz -cd -p {threads}" \
+            --outSAMtype BAM Unsorted \
+            --outFileNamePrefix {params.output_dir}/paper_pass. \
+            --outTmpDir {params.tmp_dir} \
+            --runThreadN {threads} \
+            --outFilterMultimapNmax 20 \
+            --alignSJoverhangMin 8 \
+            --alignSJDBoverhangMin 1 \
+            --outFilterMismatchNmax 999 \
+            --outFilterMismatchNoverReadLmax 0.04 \
+            --alignIntronMin 20 \
+            --alignIntronMax 1000000 \
+            --alignMatesGapMax 1000000 \
+            --outSAMstrandField intronMotif \
+            --outSAMunmapped Within
+
+        if [ -d {params.tmp_dir} ]; then
+          rm -r {params.tmp_dir}
+        fi
+
+        echo "Done!"
         """
 
 rule star_combine_genexpr:
@@ -453,5 +496,35 @@ rule get_mapped_reads:
         
         # save
         mapped_reads.to_csv(output.mapped_reads, **SAVE_PARAMS)
-        
+
         print("Done!")
+
+
+rule compute_ssu:
+    input:
+        junctions = os.path.join(DATA_DIR,"STAR","{sample}","second_pass.SJ.out.tab"),
+        bam = os.path.join(DATA_DIR,"STAR","{sample}","second_pass.Aligned.sortedByCoord.out.filtered.bam"),
+        filt_done = os.path.join(DATA_DIR,"STAR",".done_prep_bam","{sample}")
+    output:
+        ssu = os.path.join(DATA_DIR,"STAR","{sample}","second_pass.ssu.parquet")
+    params:
+        script = "src/alphagenome-pytorch/scripts/compute_ssu.py"
+    threads: 1
+    resources:
+        gres = "none",
+        partition = "genoa64",
+        runtime = 2*60,  # h in minutes
+        memory = 8  # G
+    conda:
+        "alphagenome_pytorch"
+    shell:
+        """
+        set -eo pipefail
+
+        python {params.script} \
+            --junctions {input.junctions} \
+            --bam {input.bam} \
+            --output {output.ssu}
+
+        echo "Done!"
+        """

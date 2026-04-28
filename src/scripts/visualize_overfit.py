@@ -265,10 +265,13 @@ def compute_junction_correlation(
         return np.nan
 
 
-def draw_arcs(ax, junctions: list, cmap) -> None:
+def draw_arcs(ax, junctions: list, cmap, direction: int = 1) -> None:
+    """Draw splice junction arcs.
+
+    direction=1  → arcs curve above y=0 (positive strand)
+    direction=-1 → arcs curve below y=0 (negative strand)
+    """
     if not junctions:
-        ax.text(0.5, 0.5, "No junctions", ha="center", va="center",
-                transform=ax.transAxes, color="gray", fontsize=9)
         return
     max_cnt = junctions[0][2]
     for d_pos, a_pos, cnt in junctions[:50]:
@@ -276,6 +279,7 @@ def draw_arcs(ax, junctions: list, cmap) -> None:
         if right == left:
             continue
         height = 0.2 + 0.8 * (cnt / max_cnt)
+        rad = -direction * height  # negative rad → above axis; positive → below
         ax.annotate(
             "",
             xy=(right, 0), xycoords="data",
@@ -283,7 +287,7 @@ def draw_arcs(ax, junctions: list, cmap) -> None:
             arrowprops=dict(
                 arrowstyle="-",
                 color=cmap(0.4 + 0.6 * cnt / max_cnt),
-                connectionstyle=f"arc3,rad=-{height:.2f}",
+                connectionstyle=f"arc3,rad={rad:.2f}",
                 lw=0.8, alpha=0.7,
             ),
         )
@@ -298,26 +302,36 @@ def plot_gene_sample(
     strand: str,
     sample_name: str,
     positions: np.ndarray,
-    # predicted
+    # predicted — both strands
     pred_rna_fwd: np.ndarray,
     pred_rna_rev: np.ndarray,
-    pred_donor: np.ndarray | None,
-    pred_acceptor: np.ndarray | None,
-    pred_usage: np.ndarray,
-    pred_junctions: list,
-    # real
+    pred_donor_pos: np.ndarray | None,
+    pred_donor_neg: np.ndarray | None,
+    pred_acceptor_pos: np.ndarray | None,
+    pred_acceptor_neg: np.ndarray | None,
+    pred_usage_pos: np.ndarray,
+    pred_usage_neg: np.ndarray,
+    pred_junctions_pos: list,
+    pred_junctions_neg: list,
+    # real — both strands
     real_rna_fwd: np.ndarray,
     real_rna_rev: np.ndarray,
-    real_donor: np.ndarray | None,
-    real_acceptor: np.ndarray | None,
-    real_usage: np.ndarray,
-    real_junctions: list,
+    real_donor_pos: np.ndarray | None,
+    real_donor_neg: np.ndarray | None,
+    real_acceptor_pos: np.ndarray | None,
+    real_acceptor_neg: np.ndarray | None,
+    real_usage_pos: np.ndarray,
+    real_usage_neg: np.ndarray,
+    real_junctions_pos: list,
+    real_junctions_neg: list,
+    # correlations (gene-strand specific)
     rna_corr: float,
     donor_corr: float = float("nan"),
     acceptor_corr: float = float("nan"),
     usage_corr: float = float("nan"),
     junction_corr: float = float("nan"),
 ) -> None:
+    """10-row plot; each modality row shows + strand above and − strand below the axis."""
     n_rows = 10
     fig = plt.figure(figsize=(16, 20))
     gs = gridspec.GridSpec(n_rows, 1, figure=fig, hspace=0.55)
@@ -334,70 +348,93 @@ def plot_gene_sample(
         else:
             ax.set_xlabel(f"Genomic position ({chrom})", fontsize=9)
 
-    # Row 0: Predicted RNA-seq (fwd above, rev below)
-    axes[0].fill_between(positions, pred_rna_fwd, color="steelblue", alpha=0.8, label="fwd")
-    axes[0].fill_between(positions, -pred_rna_rev, color="steelblue", alpha=0.5, label="rev")
-    axes[0].axhline(0, color="gray", lw=0.5)
-    axes[0].set_title(f"Predicted RNA-seq (fwd above / rev below)  ·  {_corr_str(rna_corr)}", fontsize=7, color="steelblue")
+    def _mirror_row(ax, pos_arr, neg_arr, color, alpha_pos=0.8, alpha_neg=0.5):
+        """Fill pos_arr above axis and -neg_arr below axis."""
+        if pos_arr is not None:
+            ax.fill_between(positions, pos_arr, color=color, alpha=alpha_pos)
+        if neg_arr is not None:
+            ax.fill_between(positions, -neg_arr, color=color, alpha=alpha_neg)
+        ax.axhline(0, color="gray", lw=0.5)
+
+    def _mirror_sites_row(ax, pos_arr, neg_arr, color):
+        """Draw vlines above axis for pos sites and below for neg sites."""
+        if pos_arr is not None:
+            sites = np.where(pos_arr > 0)[0]
+            if len(sites):
+                ax.vlines(positions[sites], 0, 1, color=color, alpha=0.8, lw=1)
+        if neg_arr is not None:
+            sites = np.where(neg_arr > 0)[0]
+            if len(sites):
+                ax.vlines(positions[sites], -1, 0, color=color, alpha=0.5, lw=1)
+        ax.axhline(0, color="gray", lw=0.5)
+
+    # Row 0: Predicted RNA-seq
+    _mirror_row(axes[0], pred_rna_fwd, pred_rna_rev, "steelblue")
+    axes[0].set_title(f"Predicted RNA-seq (+ above / − below)  ·  {_corr_str(rna_corr)}", fontsize=7, color="steelblue")
     _style(axes[0], "RNA-seq\n(pred)")
 
     # Row 1: Real RNA-seq
-    axes[1].fill_between(positions, real_rna_fwd, color="steelblue", alpha=0.4, label="fwd")
-    axes[1].fill_between(positions, -real_rna_rev, color="steelblue", alpha=0.4, label="rev")
-    axes[1].axhline(0, color="gray", lw=0.5)
-    axes[1].set_title("Real RNA-seq (fwd above / rev below)", fontsize=7, color="steelblue")
+    _mirror_row(axes[1], real_rna_fwd, real_rna_rev, "steelblue", alpha_pos=0.4, alpha_neg=0.4)
+    axes[1].set_title("Real RNA-seq (+ above / − below)", fontsize=7, color="steelblue")
     _style(axes[1], "RNA-seq\n(real)")
 
     # Row 2: Predicted splice donor
-    if pred_donor is not None:
-        axes[2].fill_between(positions, pred_donor, color="forestgreen", alpha=0.8)
-    axes[2].set_title(f"Predicted splice donor probability (+ strand)  ·  {_corr_str(donor_corr)}", fontsize=7, color="forestgreen")
-    _style(axes[2], "Donor+\n(pred)", ylim=(0, 1))
+    _mirror_row(axes[2], pred_donor_pos, pred_donor_neg, "forestgreen")
+    axes[2].set_title(f"Predicted splice donor prob (+ above / − below)  ·  {_corr_str(donor_corr)}", fontsize=7, color="forestgreen")
+    _style(axes[2], "Donor\n(pred)", ylim=(-1, 1))
 
-    # Row 3: Real splice donor sites (binary from STAR)
-    if real_donor is not None:
-        donor_sites = np.where(real_donor > 0)[0]
-        if len(donor_sites) > 0:
-            axes[3].vlines(positions[donor_sites], 0, 1, color="forestgreen", alpha=0.8, lw=1)
-    axes[3].set_title("Real splice donor sites (STAR, + strand)", fontsize=7, color="forestgreen")
-    _style(axes[3], "Donor+\n(real)", ylim=(0, 1.2))
+    # Row 3: Real splice donor sites
+    _mirror_sites_row(axes[3], real_donor_pos, real_donor_neg, "forestgreen")
+    axes[3].set_title("Real splice donor sites (STAR, + above / − below)", fontsize=7, color="forestgreen")
+    _style(axes[3], "Donor\n(real)", ylim=(-1.2, 1.2))
 
     # Row 4: Predicted splice acceptor
-    if pred_acceptor is not None:
-        axes[4].fill_between(positions, pred_acceptor, color="darkorange", alpha=0.8)
-    axes[4].set_title(f"Predicted splice acceptor probability (+ strand)  ·  {_corr_str(acceptor_corr)}", fontsize=7, color="darkorange")
-    _style(axes[4], "Acceptor+\n(pred)", ylim=(0, 1))
+    _mirror_row(axes[4], pred_acceptor_pos, pred_acceptor_neg, "darkorange")
+    axes[4].set_title(f"Predicted splice acceptor prob (+ above / − below)  ·  {_corr_str(acceptor_corr)}", fontsize=7, color="darkorange")
+    _style(axes[4], "Acceptor\n(pred)", ylim=(-1, 1))
 
     # Row 5: Real splice acceptor sites
-    if real_acceptor is not None:
-        accept_sites = np.where(real_acceptor > 0)[0]
-        if len(accept_sites) > 0:
-            axes[5].vlines(positions[accept_sites], 0, 1, color="darkorange", alpha=0.8, lw=1)
-    axes[5].set_title("Real splice acceptor sites (STAR, + strand)", fontsize=7, color="darkorange")
-    _style(axes[5], "Acceptor+\n(real)", ylim=(0, 1.2))
+    _mirror_sites_row(axes[5], real_acceptor_pos, real_acceptor_neg, "darkorange")
+    axes[5].set_title("Real splice acceptor sites (STAR, + above / − below)", fontsize=7, color="darkorange")
+    _style(axes[5], "Acceptor\n(real)", ylim=(-1.2, 1.2))
 
     # Row 6: Predicted splice usage
-    axes[6].fill_between(positions, pred_usage, color="mediumpurple", alpha=0.8)
-    axes[6].set_title(f"Predicted splice site usage  ·  {_corr_str(usage_corr)}", fontsize=7, color="mediumpurple")
+    _mirror_row(axes[6], pred_usage_pos, pred_usage_neg, "mediumpurple")
+    axes[6].set_title(f"Predicted splice site usage (+ above / − below)  ·  {_corr_str(usage_corr)}", fontsize=7, color="mediumpurple")
     _style(axes[6], "Usage\n(pred)")
 
     # Row 7: Real splice usage
-    axes[7].fill_between(positions, real_usage, color="mediumpurple", alpha=0.4)
-    axes[7].set_title("Real splice site usage (STAR)", fontsize=7, color="mediumpurple")
+    _mirror_row(axes[7], real_usage_pos, real_usage_neg, "mediumpurple", alpha_pos=0.4, alpha_neg=0.4)
+    axes[7].set_title("Real splice site usage (STAR, + above / − below)", fontsize=7, color="mediumpurple")
     _style(axes[7], "Usage\n(real)")
 
-    # Row 8: Predicted junctions (arc plot)
-    axes[8].set_ylim(0, 1.1)
+    # Row 8: Predicted junctions — pos arcs above, neg arcs below
+    axes[8].set_ylim(-1.1, 1.1)
+    axes[8].axhline(0, color="gray", lw=0.5)
     axes[8].set_yticks([])
-    axes[8].set_title(f"Predicted splice junctions  ·  rho={junction_corr:.3f}" if not np.isnan(junction_corr) else "Predicted splice junctions  ·  rho=n/a", fontsize=7)
-    draw_arcs(axes[8], pred_junctions, plt.cm.Blues)
+    axes[8].set_title(
+        f"Predicted splice junctions (+ above / − below)  ·  rho={junction_corr:.3f}"
+        if not np.isnan(junction_corr) else
+        "Predicted splice junctions (+ above / − below)  ·  rho=n/a",
+        fontsize=7,
+    )
+    draw_arcs(axes[8], pred_junctions_pos, plt.cm.Blues, direction=1)
+    draw_arcs(axes[8], pred_junctions_neg, plt.cm.Blues, direction=-1)
+    if not pred_junctions_pos and not pred_junctions_neg:
+        axes[8].text(0.5, 0.5, "No junctions", ha="center", va="center",
+                     transform=axes[8].transAxes, color="gray", fontsize=9)
     _style(axes[8], "Junctions\n(pred)")
 
-    # Row 9: Real junctions (arc plot)
-    axes[9].set_ylim(0, 1.1)
+    # Row 9: Real junctions — pos arcs above, neg arcs below
+    axes[9].set_ylim(-1.1, 1.1)
+    axes[9].axhline(0, color="gray", lw=0.5)
     axes[9].set_yticks([])
-    axes[9].set_title("Real splice junctions (STAR)", fontsize=7)
-    draw_arcs(axes[9], real_junctions, plt.cm.Greens)
+    axes[9].set_title("Real splice junctions (STAR, + above / − below)", fontsize=7)
+    draw_arcs(axes[9], real_junctions_pos, plt.cm.Greens, direction=1)
+    draw_arcs(axes[9], real_junctions_neg, plt.cm.Greens, direction=-1)
+    if not real_junctions_pos and not real_junctions_neg:
+        axes[9].text(0.5, 0.5, "No junctions", ha="center", va="center",
+                     transform=axes[9].transAxes, color="gray", fontsize=9)
     _style(axes[9], "Junctions\n(real)", last=True)
 
     plt.suptitle(
@@ -432,6 +469,8 @@ def main():
     )
     parser.add_argument("--sequence-length", type=int, default=1048576)
     parser.add_argument("--output-dir", required=True)
+    parser.add_argument("--gtf-splice-sites", default=None,
+                        help="GTF parquet with canonical splice sites (for with_gtf variant visualization)")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -468,7 +507,7 @@ def main():
     fasta = pyfaidx.Fasta(args.genome)
     bw_handles = [pyBigWig.open(f) for f in args.bigwig]  # 2*n_samples handles, fwd/rev interleaved
 
-    all_stats = []
+    all_stats: list = []
     tsv_path = os.path.join(args.output_dir, "summary_stats.tsv")
     tsv_header_written = False
 
@@ -493,7 +532,8 @@ def main():
             # supply real splice site positions to the junction head
             junc_dfs = []
             real_cls_arrs = []
-            real_usage_arrs_full = []
+            real_usage_pos_arrs_full = []
+            real_usage_neg_arrs_full = []
             real_junc_matrices = []
             real_ssps = []
             for s_idx in range(n_samples):
@@ -502,7 +542,7 @@ def main():
                     cls_arr_real = junctions_to_classification_array(
                         [junc_df], chrom, padded_start, args.sequence_length
                     )
-                    real_usage_pos, _ = junctions_to_usage_arrays_by_strand(
+                    real_usage_pos, real_usage_neg = junctions_to_usage_arrays_by_strand(
                         junc_df, chrom, padded_start, args.sequence_length
                     )
                     ssp_real, junc_matrix = junctions_to_junction_matrix(
@@ -510,13 +550,15 @@ def main():
                     )
                     junc_dfs.append(junc_df)
                     real_cls_arrs.append(cls_arr_real)
-                    real_usage_arrs_full.append(real_usage_pos)
+                    real_usage_pos_arrs_full.append(real_usage_pos)
+                    real_usage_neg_arrs_full.append(real_usage_neg)
                     real_junc_matrices.append(junc_matrix)
                     real_ssps.append(ssp_real)
                 else:
                     junc_dfs.append(None)
                     real_cls_arrs.append(None)
-                    real_usage_arrs_full.append(None)
+                    real_usage_pos_arrs_full.append(None)
+                    real_usage_neg_arrs_full.append(None)
                     real_junc_matrices.append(None)
                     real_ssps.append(None)
 
@@ -548,12 +590,17 @@ def main():
             rna_full = out0["rna_seq"][1].squeeze(0).cpu().numpy()  # (S, n_tracks)
 
             cls_full = None
-            pred_donor_full = None
-            pred_acceptor_full = None
+            pred_donor_pos_full = None
+            pred_donor_neg_full = None
+            pred_acceptor_pos_full = None
+            pred_acceptor_neg_full = None
             if "splice_sites_classification" in out0:
+                # columns: 0=Donor+, 1=Acceptor+, 2=Donor-, 3=Acceptor-, 4=None
                 cls_full = out0["splice_sites_classification"]["probs"].squeeze(0).cpu().numpy()
-                pred_donor_full = cls_full[:, 0] if cls_full.shape[1] > 0 else None
-                pred_acceptor_full = cls_full[:, 1] if cls_full.shape[1] > 1 else None
+                pred_donor_pos_full    = cls_full[:, 0] if cls_full.shape[1] > 0 else None
+                pred_acceptor_pos_full = cls_full[:, 1] if cls_full.shape[1] > 1 else None
+                pred_donor_neg_full    = cls_full[:, 2] if cls_full.shape[1] > 2 else None
+                pred_acceptor_neg_full = cls_full[:, 3] if cls_full.shape[1] > 3 else None
 
             usage_full = None
             if "splice_sites_usage" in out0:
@@ -582,131 +629,182 @@ def main():
                     continue
                 positions = np.arange(gene_start, gene_end)
 
-                # Subset predicted arrays to gene
+                # Subset predicted arrays to gene (both strands)
                 rna_roi = rna_full[off_s:off_e]
-                pred_donor_roi = pred_donor_full[off_s:off_e] if pred_donor_full is not None else None
-                pred_acceptor_roi = pred_acceptor_full[off_s:off_e] if pred_acceptor_full is not None else None
+                pred_donor_pos_roi    = pred_donor_pos_full[off_s:off_e]    if pred_donor_pos_full    is not None else None
+                pred_donor_neg_roi    = pred_donor_neg_full[off_s:off_e]    if pred_donor_neg_full    is not None else None
+                pred_acceptor_pos_roi = pred_acceptor_pos_full[off_s:off_e] if pred_acceptor_pos_full is not None else None
+                pred_acceptor_neg_roi = pred_acceptor_neg_full[off_s:off_e] if pred_acceptor_neg_full is not None else None
                 usage_roi = usage_full[off_s:off_e] if usage_full is not None else None
 
                 for s_idx, sample_name in enumerate(sample_names):
                     fwd_track = 2 * s_idx
                     rev_track = 2 * s_idx + 1
+                    is_neg_strand = (strand == "-")
 
-                    # Predicted RNA-seq
+                    # Predicted RNA-seq (both strands)
                     pred_rna_fwd = rna_roi[:, fwd_track] if rna_roi.shape[1] > fwd_track else np.zeros(gene_len, np.float32)
                     pred_rna_rev = rna_roi[:, rev_track] if rna_roi.shape[1] > rev_track else np.zeros(gene_len, np.float32)
 
-                    # Real RNA-seq from BigWig
+                    # Real RNA-seq from BigWig (both strands)
                     real_rna_fwd = load_bigwig_signal(bw_handles[fwd_track], chrom, gene_start, gene_end)
                     real_rna_rev = load_bigwig_signal(bw_handles[rev_track], chrom, gene_start, gene_end)
 
-                    rna_corr = compute_correlation(real_rna_fwd, pred_rna_fwd)
+                    # RNA correlation on the gene's strand
+                    rna_corr = compute_correlation(real_rna_rev, pred_rna_rev) if is_neg_strand else compute_correlation(real_rna_fwd, pred_rna_fwd)
 
-                    # Donor / acceptor / usage / junction correlations computed after real data is loaded
-                    donor_corr = float("nan")
-                    acceptor_corr = float("nan")
-                    usage_corr = float("nan")
-                    junction_corr = float("nan")
+                    # Predicted splice usage (both strands)
+                    pred_usage_pos = usage_roi[:, fwd_track] if usage_roi is not None and usage_roi.shape[1] > fwd_track else np.zeros(gene_len, np.float32)
+                    pred_usage_neg = usage_roi[:, rev_track] if usage_roi is not None and usage_roi.shape[1] > rev_track else np.zeros(gene_len, np.float32)
 
-                    # Predicted splice usage (fwd track)
-                    if usage_roi is not None and usage_roi.shape[1] > fwd_track:
-                        pred_usage = usage_roi[:, fwd_track]
-                    else:
-                        pred_usage = np.zeros(gene_len, np.float32)
-
-                    # Predicted junctions for this sample (from per-sample forward pass
-                    # with real STAR positions supplied as splice_site_positions)
+                    # Predicted junctions — extract both pos and neg strand lists
+                    # pssp rows: 0=pos_donors, 1=pos_acceptors, 2=neg_donors, 3=neg_acceptors
+                    # pred_counts last dim: 0..T-1 = pos strand, T..2T-1 = neg strand
+                    pred_junctions_pos: list = []
+                    pred_junctions_neg: list = []
                     junc_data = outputs_per_sample[s_idx].get("splice_sites_junction")
-                    pred_junctions: list = []
                     if junc_data is not None:
                         pssp = junc_data["splice_site_positions"].squeeze(0).cpu().numpy()  # (4, P)
                         pred_counts = junc_data["pred_counts"].squeeze(0).cpu().numpy()     # (P, P, 2T)
                         n_tissues = pred_counts.shape[2] // 2
-                        jc_fwd = pred_counts[:, :, s_idx] if pred_counts.shape[2] > s_idx else pred_counts[:, :, :n_tissues].sum(axis=2)
-                        d_genomic_all = pssp[0] + padded_start
-                        a_genomic_all = pssp[1] + padded_start
-                        valid_d = (pssp[0] >= 0) & (d_genomic_all >= gene_start) & (d_genomic_all < gene_end)
-                        valid_a = (pssp[1] >= 0) & (a_genomic_all >= gene_start) & (a_genomic_all < gene_end)
-                        for di in np.where(valid_d)[0]:
-                            for ai in np.where(valid_a)[0]:
-                                cnt = float(jc_fwd[di, ai])
-                                if cnt > 0:
-                                    pred_junctions.append((d_genomic_all[di], a_genomic_all[ai], cnt))
-                        pred_junctions.sort(key=lambda x: -x[2])
+                        for junc_list, d_row, a_row, count_col in [
+                            (pred_junctions_pos, 0, 1, s_idx),
+                            (pred_junctions_neg, 2, 3, n_tissues + s_idx),
+                        ]:
+                            if pred_counts.shape[2] <= count_col:
+                                continue
+                            jc = pred_counts[:, :, count_col]
+                            d_genomic_all = pssp[d_row] + padded_start
+                            a_genomic_all = pssp[a_row] + padded_start
+                            valid_d = (pssp[d_row] >= 0) & (d_genomic_all >= gene_start) & (d_genomic_all < gene_end)
+                            valid_a = (pssp[a_row] >= 0) & (a_genomic_all >= gene_start) & (a_genomic_all < gene_end)
+                            for di in np.where(valid_d)[0]:
+                                for ai in np.where(valid_a)[0]:
+                                    cnt = float(jc[di, ai])
+                                    if cnt > 0:
+                                        junc_list.append((d_genomic_all[di], a_genomic_all[ai], cnt))
+                            junc_list.sort(key=lambda x: -x[2])
 
-                    # Real junctions and splice arrays from STAR
-                    real_donor_arr = None
-                    real_acceptor_arr = None
-                    real_usage_arr = np.zeros(gene_len, np.float32)
-                    real_junctions: list = []
+                    # Real junctions and splice site arrays — both strands
+                    # cls_arr columns: 0=Donor+, 1=Acceptor+, 2=Donor-, 3=Acceptor-
+                    real_donor_pos_arr    = None
+                    real_donor_neg_arr    = None
+                    real_acceptor_pos_arr = None
+                    real_acceptor_neg_arr = None
+                    real_usage_pos_arr    = np.zeros(gene_len, np.float32)
+                    real_usage_neg_arr    = np.zeros(gene_len, np.float32)
+                    real_junctions_pos: list = []
+                    real_junctions_neg: list = []
 
                     if real_cls_arrs[s_idx] is not None:
-                        real_donor_arr = real_cls_arrs[s_idx][off_s:off_e, 0]
-                        real_acceptor_arr = real_cls_arrs[s_idx][off_s:off_e, 1]
-                        real_usage_arr = real_usage_arrs_full[s_idx][off_s:off_e]
+                        cls_roi = real_cls_arrs[s_idx][off_s:off_e]
+                        real_donor_pos_arr    = cls_roi[:, 0]
+                        real_acceptor_pos_arr = cls_roi[:, 1]
+                        real_donor_neg_arr    = cls_roi[:, 2]
+                        real_acceptor_neg_arr = cls_roi[:, 3]
+                        if real_usage_pos_arrs_full[s_idx] is not None:
+                            real_usage_pos_arr = real_usage_pos_arrs_full[s_idx][off_s:off_e]
+                        if real_usage_neg_arrs_full[s_idx] is not None:
+                            real_usage_neg_arr = real_usage_neg_arrs_full[s_idx][off_s:off_e]
 
                         ssp_real = real_ssps[s_idx]
                         junc_matrix = real_junc_matrices[s_idx]
-                        for di, d_rel in enumerate(ssp_real[0]):
-                            if d_rel < 0:
-                                break
-                            d_genomic = int(d_rel) + padded_start
-                            if not (gene_start <= d_genomic < gene_end):
-                                continue
-                            for ai, a_rel in enumerate(ssp_real[1]):
-                                if a_rel < 0:
+                        # ssp_real rows: 0=pos_donors, 1=pos_acceptors, 2=neg_donors, 3=neg_acceptors
+                        # matrix last-dim: 0..n_samples-1 = pos strand, n_samples..2n-1 = neg strand
+                        n_samples_junc = junc_matrix.shape[2] // 2
+                        for junc_list, d_ssp_row, a_ssp_row, junc_s_col in [
+                            (real_junctions_pos, 0, 1, s_idx),
+                            (real_junctions_neg, 2, 3, n_samples_junc + s_idx),
+                        ]:
+                            for di, d_rel in enumerate(ssp_real[d_ssp_row]):
+                                if d_rel < 0:
                                     break
-                                a_genomic = int(a_rel) + padded_start
-                                if not (gene_start <= a_genomic < gene_end):
+                                d_genomic = int(d_rel) + padded_start
+                                if not (gene_start <= d_genomic < gene_end):
                                     continue
-                                cnt = float(junc_matrix[di, ai, 0])
-                                if cnt > 0:
-                                    real_junctions.append((d_genomic, a_genomic, cnt))
-                        real_junctions.sort(key=lambda x: -x[2])
+                                for ai, a_rel in enumerate(ssp_real[a_ssp_row]):
+                                    if a_rel < 0:
+                                        break
+                                    a_genomic = int(a_rel) + padded_start
+                                    if not (gene_start <= a_genomic < gene_end):
+                                        continue
+                                    cnt = float(junc_matrix[di, ai, junc_s_col])
+                                    if cnt > 0:
+                                        junc_list.append((d_genomic, a_genomic, cnt))
+                            junc_list.sort(key=lambda x: -x[2])
 
-                    # Compute correlations now that real arrays are ready
-                    if pred_donor_roi is not None and real_donor_arr is not None:
-                        donor_corr = compute_correlation_all(real_donor_arr, pred_donor_roi)
-                    if pred_acceptor_roi is not None and real_acceptor_arr is not None:
-                        acceptor_corr = compute_correlation_all(real_acceptor_arr, pred_acceptor_roi)
-                    usage_corr = compute_correlation(real_usage_arr, pred_usage)
-                    junction_corr = compute_junction_correlation(pred_junctions, real_junctions)
+                    # Correlations use the gene's strand
+                    donor_corr    = float("nan")
+                    acceptor_corr = float("nan")
+                    usage_corr    = float("nan")
+                    junction_corr = float("nan")
+                    if is_neg_strand:
+                        if pred_donor_neg_roi is not None and real_donor_neg_arr is not None:
+                            donor_corr = compute_correlation_all(real_donor_neg_arr, pred_donor_neg_roi)
+                        if pred_acceptor_neg_roi is not None and real_acceptor_neg_arr is not None:
+                            acceptor_corr = compute_correlation_all(real_acceptor_neg_arr, pred_acceptor_neg_roi)
+                        usage_corr    = compute_correlation(real_usage_neg_arr, pred_usage_neg)
+                        junction_corr = compute_junction_correlation(pred_junctions_neg, real_junctions_neg)
+                    else:
+                        if pred_donor_pos_roi is not None and real_donor_pos_arr is not None:
+                            donor_corr = compute_correlation_all(real_donor_pos_arr, pred_donor_pos_roi)
+                        if pred_acceptor_pos_roi is not None and real_acceptor_pos_arr is not None:
+                            acceptor_corr = compute_correlation_all(real_acceptor_pos_arr, pred_acceptor_pos_roi)
+                        usage_corr    = compute_correlation(real_usage_pos_arr, pred_usage_pos)
+                        junction_corr = compute_junction_correlation(pred_junctions_pos, real_junctions_pos)
+
+                    pred_junc_for_summary = pred_junctions_neg if is_neg_strand else pred_junctions_pos
+                    real_junc_for_summary = real_junctions_neg if is_neg_strand else real_junctions_pos
 
                     # Save parquet
                     parquet_data: dict = {
-                        "chrom":             chrom,
-                        "position":          positions,
-                        "gene_name":         gene_name,
-                        "strand":            strand,
-                        "sample":            sample_name,
-                        "pred_rna_fwd":      pred_rna_fwd,
-                        "pred_rna_rev":      pred_rna_rev,
-                        "real_rna_fwd":      real_rna_fwd,
-                        "real_rna_rev":      real_rna_rev,
-                        "pred_splice_usage": pred_usage,
-                        "real_splice_usage": real_usage_arr,
+                        "chrom":               chrom,
+                        "position":            positions,
+                        "gene_name":           gene_name,
+                        "strand":              strand,
+                        "sample":              sample_name,
+                        "pred_rna_fwd":        pred_rna_fwd,
+                        "pred_rna_rev":        pred_rna_rev,
+                        "real_rna_fwd":        real_rna_fwd,
+                        "real_rna_rev":        real_rna_rev,
+                        "pred_splice_usage_pos": pred_usage_pos,
+                        "pred_splice_usage_neg": pred_usage_neg,
+                        "real_splice_usage_pos": real_usage_pos_arr,
+                        "real_splice_usage_neg": real_usage_neg_arr,
                     }
-                    if pred_donor_roi is not None:
-                        parquet_data["pred_donor_prob"] = pred_donor_roi
-                    if pred_acceptor_roi is not None:
-                        parquet_data["pred_acceptor_prob"] = pred_acceptor_roi
-                    if real_donor_arr is not None:
-                        parquet_data["real_donor_sites"] = real_donor_arr
-                    if real_acceptor_arr is not None:
-                        parquet_data["real_acceptor_sites"] = real_acceptor_arr
+                    for key, arr in [
+                        ("pred_donor_pos_prob",    pred_donor_pos_roi),
+                        ("pred_donor_neg_prob",    pred_donor_neg_roi),
+                        ("pred_acceptor_pos_prob", pred_acceptor_pos_roi),
+                        ("pred_acceptor_neg_prob", pred_acceptor_neg_roi),
+                        ("real_donor_pos_sites",   real_donor_pos_arr),
+                        ("real_donor_neg_sites",   real_donor_neg_arr),
+                        ("real_acceptor_pos_sites", real_acceptor_pos_arr),
+                        ("real_acceptor_neg_sites", real_acceptor_neg_arr),
+                    ]:
+                        if arr is not None:
+                            parquet_data[key] = arr
 
                     stem = f"{gene_name}_{gene_start}_{gene_end}_{sample_name}"
                     pd.DataFrame(parquet_data).to_parquet(
                         os.path.join(args.output_dir, f"{stem}.parquet"), index=False
                     )
-                    if pred_junctions:
-                        (pd.DataFrame(pred_junctions, columns=["donor_pos", "acceptor_pos", "pred_count"])
-                           .assign(chrom=chrom)
-                           .to_parquet(os.path.join(args.output_dir, f"{stem}_pred_junctions.parquet"), index=False))
-                    if real_junctions:
-                        (pd.DataFrame(real_junctions, columns=["donor_pos", "acceptor_pos", "real_count"])
-                           .assign(chrom=chrom)
-                           .to_parquet(os.path.join(args.output_dir, f"{stem}_real_junctions.parquet"), index=False))
+                    all_junctions_pred = pred_junctions_pos + pred_junctions_neg
+                    all_junctions_real = real_junctions_pos + real_junctions_neg
+                    if all_junctions_pred:
+                        (pd.DataFrame(
+                            [(d, a, c, "+") for d, a, c in pred_junctions_pos] +
+                            [(d, a, c, "-") for d, a, c in pred_junctions_neg],
+                            columns=["donor_pos", "acceptor_pos", "pred_count", "strand"],
+                         ).assign(chrom=chrom)
+                         .to_parquet(os.path.join(args.output_dir, f"{stem}_pred_junctions.parquet"), index=False))
+                    if all_junctions_real:
+                        (pd.DataFrame(
+                            [(d, a, c, "+") for d, a, c in real_junctions_pos] +
+                            [(d, a, c, "-") for d, a, c in real_junctions_neg],
+                            columns=["donor_pos", "acceptor_pos", "real_count", "strand"],
+                         ).assign(chrom=chrom)
+                         .to_parquet(os.path.join(args.output_dir, f"{stem}_real_junctions.parquet"), index=False))
 
                     # Plot
                     pdf_path = os.path.join(args.output_dir, f"{stem}.pdf")
@@ -721,16 +819,24 @@ def main():
                         positions=positions,
                         pred_rna_fwd=pred_rna_fwd,
                         pred_rna_rev=pred_rna_rev,
-                        pred_donor=pred_donor_roi,
-                        pred_acceptor=pred_acceptor_roi,
-                        pred_usage=pred_usage,
-                        pred_junctions=pred_junctions,
+                        pred_donor_pos=pred_donor_pos_roi,
+                        pred_donor_neg=pred_donor_neg_roi,
+                        pred_acceptor_pos=pred_acceptor_pos_roi,
+                        pred_acceptor_neg=pred_acceptor_neg_roi,
+                        pred_usage_pos=pred_usage_pos,
+                        pred_usage_neg=pred_usage_neg,
+                        pred_junctions_pos=pred_junctions_pos,
+                        pred_junctions_neg=pred_junctions_neg,
                         real_rna_fwd=real_rna_fwd,
                         real_rna_rev=real_rna_rev,
-                        real_donor=real_donor_arr,
-                        real_acceptor=real_acceptor_arr,
-                        real_usage=real_usage_arr,
-                        real_junctions=real_junctions,
+                        real_donor_pos=real_donor_pos_arr,
+                        real_donor_neg=real_donor_neg_arr,
+                        real_acceptor_pos=real_acceptor_pos_arr,
+                        real_acceptor_neg=real_acceptor_neg_arr,
+                        real_usage_pos=real_usage_pos_arr,
+                        real_usage_neg=real_usage_neg_arr,
+                        real_junctions_pos=real_junctions_pos,
+                        real_junctions_neg=real_junctions_neg,
                         rna_corr=rna_corr,
                         donor_corr=donor_corr,
                         acceptor_corr=acceptor_corr,
@@ -744,7 +850,7 @@ def main():
                         f"  acceptor={_corr_str(acceptor_corr)}"
                         f"  usage={_corr_str(usage_corr)}"
                         f"  junc={_corr_str(junction_corr)}"
-                        f"  pred_junc={len(pred_junctions)}  real_junc={len(real_junctions)}"
+                        f"  pred_junc={len(pred_junc_for_summary)}  real_junc={len(real_junc_for_summary)}"
                         f"  → {pdf_path}"
                     )
 
@@ -761,8 +867,8 @@ def main():
                         "acceptor_correlation":   acceptor_corr,
                         "usage_correlation":      usage_corr,
                         "junction_correlation":   junction_corr,
-                        "n_pred_junctions":       len(pred_junctions),
-                        "n_real_junctions":       len(real_junctions),
+                        "n_pred_junctions":       len(pred_junc_for_summary),
+                        "n_real_junctions":       len(real_junc_for_summary),
                     }
                     all_stats.append(row)
                     with open(tsv_path, "a") as tsv_f:
@@ -772,8 +878,8 @@ def main():
                         tsv_f.write("\t".join(str(v) for v in row.values()) + "\n")
 
             del rna_full, cls_full, usage_full, outputs_per_sample
-            del pred_donor_full, pred_acceptor_full
-            del junc_dfs, real_cls_arrs, real_usage_arrs_full, real_junc_matrices, real_ssps
+            del pred_donor_pos_full, pred_donor_neg_full, pred_acceptor_pos_full, pred_acceptor_neg_full
+            del junc_dfs, real_cls_arrs, real_usage_pos_arrs_full, real_usage_neg_arrs_full, real_junc_matrices, real_ssps
 
         except Exception as e:
             import traceback

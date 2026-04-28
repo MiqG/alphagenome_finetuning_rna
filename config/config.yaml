@@ -19,6 +19,8 @@ gencode:
     star_index: "data/raw/GENCODE/release_46/star_index"
 
 rnaseq:
+  hepg2:
+    path: "data/raw/ENCODE/hepg2"
   sf3b1mut:
     metadata: "support/ENA_filereport-compendium-sf3b1mut.tsv"
     path: "data/raw/ENA/sf3b1mut"
@@ -67,7 +69,7 @@ finetuning:
       overlap_highres: 1024
       lr: 1e-4
       warmup_steps: 200
-      epochs: 10
+      epochs: 2
       batch_size: 1
       gradient_accumulation_steps: 8
       track_means_samples: 500  # intervals to sample for track mean estimation (subset for speed)

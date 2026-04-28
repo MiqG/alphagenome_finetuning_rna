@@ -1,0 +1,16 @@
+name: spliser
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python>=3.10
+  - pysam>=0.22
+  - libssh2
+  - pandas>=2.0
+  - pyarrow>=14.0
+  - matplotlib>=3.8
+  - scipy>=1.11
+  - pip
+  - pip:
+      - HTSeq>=2.0
+      - git+file:///users/diasfrazer/manglada/repositories/SpliSER@speedups#egg=spliser

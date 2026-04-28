@@ -1,3 +1,4 @@
+*-workspace
 .claude
 src/alphagenome-pytorch
 scratch/*
