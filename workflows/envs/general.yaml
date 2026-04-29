@@ -3,6 +3,8 @@ channels:
   - bioconda
   - conda-forge
 dependencies:
+  # plotting
+  - mscorefonts
   # alignment
   - star=2.7.11b
   - sambamba>=1.0
@@ -20,3 +22,6 @@ dependencies:
   - tqdm
   # downloading
   - wget
+  - pip
+  - pip:
+    - statannotations

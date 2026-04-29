@@ -1,19 +1,30 @@
 """
 Development finetuning workflow for AlphaGenome on SF3B1-mutant RNA-seq data.
 
-Subsets 2000 intervals from FOLD_1 train/valid beds and fine-tunes on two
-representative samples (SRR17111301, SRR17111311) using precomputed SSU
-parquets and GTF annotation for splice site classification.
+Selects train intervals (120 top + 50 random) and val intervals (20 top + 10
+random) from FOLD_1 beds ranked by splice junction activity (total
+uniquely-mapped junction reads across both DEV_SAMPLES, with number of
+distinct junctions as tiebreaker). Fine-tunes on two representative samples
+(SRR17111303, SRR17111311) using precomputed SSU parquets and GTF annotation
+for splice site classification.
 
-Three runs are compared:
-  - annotated_lp_nolora: junction positions from STAR SJ.out.tab files (linear-probe)
-  - predicted_lp_nolora: junction positions from top-k=512 splice_site head predictions (linear-probe)
-  - annotated_lp_lora:   same as annotated_lp_nolora but with LoRA (rank=8) adapters
+Run names follow a four-axis combinatorial scheme:
+  {annotated|predicted}_{randinit|pretrinit}_{frozen|lora}_{seed0|seed1}
+
+  annotated / predicted  — splice junction position source
+                           (annotated: STAR SJ.out.tab; predicted: top-k=512 splice_site head)
+  randinit  / pretrinit  — head weight initialisation
+                           (randinit: default truncated-normal; pretrinit: all heads seeded from
+                            organism track index 0 of the pretrained model)
+  frozen    / lora       — backbone training mode
+                           (frozen: linear-probe on frozen backbone; lora: LoRA rank=8 adapters)
+  seed0     / seed1      — random seed for weight init and data shuffling
 
 Run with:
     snakemake -s workflows/finetune_dev.smk --use-conda [-n]
 """
 
+import itertools
 import os
 
 configfile: "config/config.yaml"
@@ -26,48 +37,100 @@ DEV_OUTPUT_DIR  = config["finetuning"]["alphagenome"]["sf3b1mut"]["output_dir"].
 # DEV_SAMPLES    = ["SRR17111301", "SRR17111311"]
 DEV_SAMPLES = ["SRR17111303","SRR17111311"]
 BIGWIG_STRANDS = ["forward", "reverse"]
-N_INTERVALS    = 2000
+N_TRAIN_TOP      = 120
+N_TRAIN_RANDOM   = 50
+N_VAL_TOP        = 20
+N_VAL_RANDOM     = 10
+N_TRAIN_INTERVALS = N_TRAIN_TOP + N_TRAIN_RANDOM
+N_VAL_INTERVALS   = N_VAL_TOP + N_VAL_RANDOM
+N_INTERVALS_BY_SPLIT = {"train": N_TRAIN_TOP, "valid": N_VAL_TOP}
+N_RANDOM_BY_SPLIT    = {"train": N_TRAIN_RANDOM, "valid": N_VAL_RANDOM}
 JUNCTION_TOP_K = 512
+SEEDS = [0]#[0, 1]
+EPOCHS = 10
 
-RUN_NAMES = ["annotated_lp_nolora", "predicted_lp_nolora", "annotated_lp_lora"]
+JUNCTION_SOURCES = ["annotated", "predicted"]
+HEAD_INITS       = ["randinit", "pretrinit"]
+BACKBONE_MODES   = ["frozen", "lora"]
 
-# Map run name → --junction-position-source flag value
-JUNCTION_POSITION_SOURCE = {
-    "annotated_lp_nolora": "annotated",
-    "predicted_lp_nolora": "predicted",
-    "annotated_lp_lora":   "annotated",
-}
+RUN_NAMES = [
+    "{}_{}_{}_{}" .format(js, hi, bm, "seed{}".format(s))
+    for js, hi, bm, s in itertools.product(JUNCTION_SOURCES, HEAD_INITS, BACKBONE_MODES, SEEDS)
+]
 
-# LoRA / LoCon settings for the annotated_lora run.
+# LoRA settings for backbone="lora" runs.
 # Targets use substring matching against full dotted module paths.
 # Backbone submodules are: encoder, tower, decoder, embedder_1bp.
 # Heads live under "heads." — excluded by using backbone-prefixed substrings so
 # that freshly-initialised head parameters are not double-wrapped with adapters.
-#   LoRA  (Linear): attention projections and FFN linears in tower + decoder linears
-#   LoCon (Conv1d): conv blocks in encoder down-path, decoder up-path, embedder skip
-# Rank=8/alpha=8 (scale=1) for LoRA; rank=4/alpha=1 for LoCon — conservative scaling
-# to avoid adapter magnitude dominating the small dev training set.
-LORA_RANK     = 8
-LORA_ALPHA    = 8
-LORA_TARGETS  = "encoder.linear,encoder.proj,tower.linear,tower.proj,tower.fc,decoder.linear,decoder.proj,embedder_1bp.linear,embedder_1bp.proj"
-LOCON_RANK    = None
-LOCON_ALPHA   = None
-LOCON_TARGETS = None # "encoder.conv,encoder.dna_embedder,decoder.conv,embedder_1bp.conv,embedder_1bp.project_skip"
+# Rank=8/alpha=8 (scale=1) — conservative scaling for the small dev training set.
+LORA_RANK    = 8
+LORA_ALPHA   = 8
+LORA_TARGETS = "encoder.linear,encoder.proj,tower.linear,tower.proj,tower.fc,decoder.linear,decoder.proj,embedder_1bp.linear,embedder_1bp.proj"
+
+# Pretrained-head samples flag: initialise all modality heads from organism track index 0.
+# pretrained track selected with: 
+# track_metadata.query("output_type=='rna_seq'").reset_index(drop=True).query("track_name=='EFO:0002067 total RNA-seq'")
+# df.query("output_type=='splice_sites_usage'").reset_index(drop=True).query("track_name=='usage_EFO:0002067 total RNA-seq'")
+_PRETRINIT_FLAG = (
+    "--pretrained-head-samples 'rna_seq:120|391|120|391'" # forward|reverse|forward|reverse
+    " --pretrained-head-samples splice_site:0" # just one head
+    " --pretrained-head-samples 'splice_usage:140|507|140|507'" # forward|reverse|forward|reverse
+    " --pretrained-head-samples splice_junctions:140" # forward and reverse
+)
+
+
+def _junction_source(wc):
+    return wc.run_name.split("_")[0]          # "annotated" | "predicted"
+
+def _head_init(wc):
+    return wc.run_name.split("_")[1]          # "randinit" | "pretrinit"
+
+def _backbone_mode(wc):
+    return wc.run_name.split("_")[2]          # "frozen" | "lora"
+
+def _seed(wc):
+    return int(wc.run_name.split("seed")[1])  # 0 | 1
 
 
 rule all:
     input:
-        os.path.join(DEV_OUTPUT_DIR, "summary.pdf"),
+        expand(
+            os.path.join(DEV_OUTPUT_DIR, "run", "{run_name}", "best_model.pth"),
+            run_name = RUN_NAMES,
+        ),
+        os.path.join(DEV_OUTPUT_DIR, "run", "summary.pdf"),
 
 
-rule subset_bed:
-    """Subset first N_INTERVALS lines from a FOLD_1 BED file."""
+rule select_top_intervals:
+    """Select top N intervals from a FOLD_1 BED file ranked by splice junction activity."""
+    wildcard_constraints:
+        split = "train|valid",
     input:
-        bed = os.path.join(FOLDS_DIR, "FOLD_1", "{split}.bed"),
+        bed            = os.path.join(FOLDS_DIR, "FOLD_1", "{split}.bed"),
+        star_junctions = [
+            os.path.join(DATA_DIR, "STAR", sample, "second_pass.SJ.out.tab")
+            for sample in DEV_SAMPLES
+        ],
     output:
         bed = os.path.join(DEV_OUTPUT_DIR, "beds", "{split}.bed"),
+    params:
+        script   = "src/scripts/select_top_intervals.py",
+        n        = lambda wc: N_INTERVALS_BY_SPLIT[wc.split],
+        n_random = lambda wc: N_RANDOM_BY_SPLIT[wc.split],
+        seed     = 42,
+    conda:
+        "alphagenome_finetuning_rna"
     shell:
-        "head -n {N_INTERVALS} {input.bed} > {output.bed}"
+        """
+        python {params.script} \
+            --bed {input.bed} \
+            --star-junctions {input.star_junctions} \
+            --n {params.n} \
+            --n-random {params.n_random} \
+            --seed {params.seed} \
+            --output {output.bed}
+        """
 
 
 rule finetune_dev:
@@ -102,20 +165,23 @@ rule finetune_dev:
         modality_splicing           = config["finetuning"]["alphagenome"]["sf3b1mut"]["modality_splicing"],
         sequence_length             = config["finetuning"]["alphagenome"]["sf3b1mut"]["sequence_length"],
         overlap_highres             = config["finetuning"]["alphagenome"]["sf3b1mut"]["overlap_highres"],
-        lr                          = 3e-4,
-        warmup_steps                = 200,
-        epochs                      = config["finetuning"]["alphagenome"]["sf3b1mut"]["epochs"],
+        lr                          = 1e-3, #lambda wc: 2e-4 if _head_init(wc) == "pretrinit" else 1e-3,
+        warmup_steps                = lambda wc: 0 if _head_init(wc) == "pretrinit" else 2,
+        lr_schedule                 = "cosine", #lambda wc: "constant" if _head_init(wc) == "pretrinit" else "cosine",
+        epochs                      = EPOCHS,
         batch_size                  = config["finetuning"]["alphagenome"]["sf3b1mut"]["batch_size"],
-        gradient_accumulation_steps = config["finetuning"]["alphagenome"]["sf3b1mut"]["gradient_accumulation_steps"],
-        track_means_samples         = N_INTERVALS,
+        gradient_accumulation_steps = 8,
+        track_means_samples         = N_TRAIN_INTERVALS,
         save_every_steps            = config["finetuning"]["alphagenome"]["sf3b1mut"]["save_every_steps"],
         output_dir                  = os.path.join(DEV_OUTPUT_DIR, "run"),
-        junction_position_source    = lambda wc: JUNCTION_POSITION_SOURCE[wc.run_name],
-        junction_top_k_flag         = lambda wc: f"--junction-top-k {JUNCTION_TOP_K}" if wc.run_name == "predicted_lp_nolora" else "",
-        mode_flag                   = lambda wc: "lora" if wc.run_name == "annotated_lp_lora" else "linear-probe",
+        junction_position_source    = lambda wc: _junction_source(wc),
+        junction_top_k_flag         = lambda wc: "--junction-top-k {}".format(JUNCTION_TOP_K) if _junction_source(wc) == "predicted" else "",
+        pretrained_head_flag        = lambda wc: _PRETRINIT_FLAG if _head_init(wc) == "pretrinit" else "",
+        mode_flag                   = lambda wc: "lora" if _backbone_mode(wc) == "lora" else "linear-probe",
         lora_flags                  = lambda wc: (
-            f"--lora-rank {LORA_RANK} --lora-alpha {LORA_ALPHA} --lora-targets {LORA_TARGETS}"
-        ) if wc.run_name == "annotated_lp_lora" else "",
+            "--lora-rank {} --lora-alpha {} --lora-targets {}".format(LORA_RANK, LORA_ALPHA, LORA_TARGETS)
+        ) if _backbone_mode(wc) == "lora" else "",
+        seed                        = lambda wc: _seed(wc),
         run_name                    = "{run_name}",
     threads: 6
     resources:
@@ -151,7 +217,7 @@ rule finetune_dev:
             --resume auto \
             --lr {params.lr} \
             --warmup-steps {params.warmup_steps} \
-            --lr-schedule cosine \
+            --lr-schedule {params.lr_schedule} \
             --batch-size {params.batch_size} \
             --gradient-accumulation-steps {params.gradient_accumulation_steps} \
             --epochs {params.epochs} \
@@ -159,37 +225,41 @@ rule finetune_dev:
             --sequence-length {params.sequence_length} \
             --track-means-samples {params.track_means_samples} \
             --save-every-steps {params.save_every_steps} \
-            --max-grad-norm inf \
             --junction-position-source {params.junction_position_source} \
             {params.junction_top_k_flag} \
+            {params.pretrained_head_flag} \
             {params.lora_flags} \
-            --pretrained-head-samples splice_site:0 \
-            --run-name {params.run_name} \
             --max-grad-norm 1.0 \
-            --organism human
+            --log-every 20 \
+            --seed {params.seed} \
+            --run-name {params.run_name} \
+            --organism human \
+            --eval-train-pearson
 
         rm -f "$FINETUNE_SCRIPT"
 
-        #find {params.output_dir} -name "*.pth" ! -name "best_model.pth" -delete
+        RUN_DIR="{params.output_dir}/{params.run_name}"
+        find "$RUN_DIR" -name "checkpoint_epoch*.pth" | sort -V | head -n -1 | xargs -r rm -f
+        rm -f "$RUN_DIR/checkpoint_preempt.pth"
         """
 
 
 rule plot_dev_summary:
-    """Plot training dynamics and prediction correlations for both dev runs."""
+    """Plot training dynamics and prediction correlations for all dev runs."""
     input:
         checkpoints = expand(
             os.path.join(DEV_OUTPUT_DIR, "run", "{run_name}", "best_model.pth"),
             run_name = RUN_NAMES,
         ),
     output:
-        pdf = os.path.join(DEV_OUTPUT_DIR, "summary.pdf"),
+        pdf = os.path.join(DEV_OUTPUT_DIR, "run", "summary.pdf"),
     params:
         script   = "src/scripts/plot_run_summary.py",
         run_dirs = " ".join(
             os.path.join(DEV_OUTPUT_DIR, "run", r) for r in RUN_NAMES
         ),
     conda:
-        "alphagenome_pytorch"
+        "alphagenome_finetuning_rna"
     shell:
         """
         python {params.script} \
