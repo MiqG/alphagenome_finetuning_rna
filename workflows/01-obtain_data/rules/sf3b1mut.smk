@@ -17,6 +17,7 @@ metadata = metadata.loc[metadata["library_source"]=="TRANSCRIPTOMIC"]
 URLS = metadata["fastq_ftp"].str.split(";").str[0].apply(os.path.dirname).to_list()
 URLS = {os.path.basename(url): url for url in URLS}
 SAMPLES = list(URLS.keys())
+SAMPLES = ["SRR17111303","SRR17111311"]
 N_SAMPLES = len(SAMPLES)
 
 ## fastq sizes
@@ -261,6 +262,39 @@ rule star_paper_pass:
         echo "Done!"
         """
 
+rule sort_paper_pass:
+    input:
+        align_done = os.path.join(DATA_DIR,"STAR",".done_align_paper","{sample}"),
+    params:
+        output_dir   = os.path.join(DATA_DIR,"STAR","{sample}"),
+        tmp_dir      = os.path.join(TMP_ROOT,"sf3b1mut_paper","{sample}"),
+        memory_limit = 20000000000,
+    output:
+        sort_done = touch(os.path.join(DATA_DIR,"STAR",".done_sort_paper","{sample}")),
+    threads: 6
+    resources:
+        gres      = "none",
+        partition = "genoa64",
+        runtime   = 2*60,
+        memory    = 40,
+    conda:
+        "alphagenome_finetuning_rna"
+    shell:
+        """
+        set -eo pipefail
+
+        sambamba sort \
+            --nthreads {threads} \
+            --show-progress \
+            --tmpdir {params.tmp_dir} \
+            --memory-limit {params.memory_limit} \
+            --out {params.output_dir}/paper_pass.Aligned.sortedByCoord.out.bam \
+            {params.output_dir}/paper_pass.Aligned.out.bam
+
+        echo "Done!"
+        """
+
+
 rule star_combine_genexpr:
     input:
         [os.path.join(DATA_DIR,"STAR",".done_align_second","{sample}").format(sample=sample) for sample in SAMPLES]
@@ -313,9 +347,8 @@ rule star_combine_genexpr:
 
 rule prep_bam:
     input:
-        align_done = os.path.join(DATA_DIR,"STAR",".done_align_second","{sample}")
+        sort_done = os.path.join(DATA_DIR,"STAR",".done_sort_paper","{sample}")
     params:
-        star_scripts_dir = "~/repositories/STAR-2.7.11a/extras/scripts",
         output_dir = os.path.join(DATA_DIR,"STAR","{sample}"),
         chromosomes_oi = "' or ref_name=='".join(config["variables"]["CHROMOSOMES"])
     output:
@@ -331,33 +364,27 @@ rule prep_bam:
     shell:
         """
         set -eo pipefail
-        
+
         echo "Indexing BAM..."
         sambamba index \
             --show-progress \
             --nthreads {threads} \
-            {params.output_dir}/second_pass.Aligned.sortedByCoord.out.bam
-        
-        echo "Filtering chromosomes and low quality mappings, and adding strand in BAM..."
+            {params.output_dir}/paper_pass.Aligned.sortedByCoord.out.bam
+
+        echo "Filtering chromosomes and uniquely mapped reads..."
         sambamba view \
             --nthreads {threads} \
             --show-progress \
             --format bam \
             --filter "ref_name=='{params.chromosomes_oi}'" \
-            {params.output_dir}/second_pass.Aligned.sortedByCoord.out.bam \
+            {params.output_dir}/paper_pass.Aligned.sortedByCoord.out.bam \
         | samtools view \
             --threads {threads} \
             -q 255 \
-            -h \
-        | awk \
-            -v strType=2 \
-            -f {params.star_scripts_dir}/tagXSstrandedData.awk \
-        | samtools view \
-            --threads {threads} \
             -bS \
             - \
-        > {params.output_dir}/second_pass.Aligned.sortedByCoord.out.filtered.bam
-        
+        > {params.output_dir}/paper_pass.Aligned.sortedByCoord.out.filtered.bam
+
         echo "Done!"
         """
         
@@ -383,15 +410,15 @@ rule make_bigwig:
         sambamba index \
             --show-progress \
             --nthreads {threads} \
-            {params.output_dir}/second_pass.Aligned.sortedByCoord.out.filtered.bam
-            
+            {params.output_dir}/paper_pass.Aligned.sortedByCoord.out.filtered.bam
+
         echo "Making coverage..."
         bamCoverage \
-            --bam {params.output_dir}/second_pass.Aligned.sortedByCoord.out.filtered.bam \
+            --bam {params.output_dir}/paper_pass.Aligned.sortedByCoord.out.filtered.bam \
             --filterRNAstrand {params.strand} \
             --outFileFormat "bigwig" \
             --binSize 1 \
-            --outFileName {params.output_dir}/second_pass.Aligned.sortedByCoord.out.filtered.{params.strand}.bw
+            --outFileName {params.output_dir}/paper_pass.Aligned.sortedByCoord.out.filtered.{params.strand}.bw
         
         echo "Done!"
         """
@@ -415,7 +442,7 @@ rule make_bigwig_mapping:
             filename = os.path.basename(f)
             sample, strand = filename.split("-")
             output_dir = os.path.join(os.path.dirname(os.path.dirname(f)), sample)
-            bigwig_file = os.path.join(output_dir, "second_pass.Aligned.sortedByCoord.out.filtered.{strand}.bw").format(strand=strand)
+            bigwig_file = os.path.join(output_dir, "paper_pass.Aligned.sortedByCoord.out.filtered.{strand}.bw").format(strand=strand)
             
             assert os.path.isfile(bigwig_file)
             
@@ -468,7 +495,7 @@ rule get_mapped_reads:
         def get_mapped_reads(row):
             # get mapped reads in bam
             bigwig_file = row["bigwig_file"]
-            in_bam = bigwig_file.replace(".forward.bw",".bam").replace(".reverse.bw",".bam")
+            in_bam = bigwig_file.replace(".forward.bw", "").replace(".reverse.bw", "") + ".bam"
             samfile = pysam.AlignmentFile(in_bam)
             mapped_reads = float(samfile.mapped)
             
@@ -502,8 +529,8 @@ rule get_mapped_reads:
 
 rule compute_ssu:
     input:
-        junctions = os.path.join(DATA_DIR,"STAR","{sample}","second_pass.SJ.out.tab"),
-        bam = os.path.join(DATA_DIR,"STAR","{sample}","second_pass.Aligned.sortedByCoord.out.filtered.bam"),
+        junctions = os.path.join(DATA_DIR,"STAR","{sample}","paper_pass.SJ.out.tab"),
+        bam = os.path.join(DATA_DIR,"STAR","{sample}","paper_pass.Aligned.sortedByCoord.out.filtered.bam"),
         filt_done = os.path.join(DATA_DIR,"STAR",".done_prep_bam","{sample}")
     output:
         ssu = os.path.join(DATA_DIR,"STAR","{sample}","second_pass.ssu.parquet")

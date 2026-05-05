@@ -1,26 +1,30 @@
 # Fine-tuning splicing heads for AlphaGenome
 
 ## workflows
-1. obtain data
+1. obtain data (`workflows/01-obtain_data/Snakefile`)
+
+   ```bash
+   snakemake -s workflows/01-obtain_data/Snakefile --use-conda -j <cores>
+   ```
    - genome sequence and annotations from GENCODE
       - download genome sequence
       - download genome annotation
 
-   - RNA-seq
+   - RNA-seq (SF3B1-mutant MEC1, ENA)
       - download fastq
-      - align
+      - align (STAR two-pass)
          - splice junctions
          - bam files
       - process bam files
          - splice site usage (contain strand information)
          - coverage bigwig (one if unstranded two if stranded)
-      - comparison SSU
+      - comparison SSU (`workflows/01-obtain_data/rules/comparison_ssu.smk`)
          - compare that preprocessing is equivalent with SpliSER
          - not only output values, but also time to process every single sample
 
    - models
-      - download model weights
-      - download and prepare genome interval folds
+      - download model weights (AlphaGenome-PyTorch)
+      - download and prepare genome interval folds (Borzoi hg38 sequences.bed)
 
 2. preprocess data
    - single intervals to overfit: select intervals with many, medium and few splice junctions
