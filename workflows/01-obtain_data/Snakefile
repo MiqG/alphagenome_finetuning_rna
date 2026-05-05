@@ -31,7 +31,7 @@ rule all:
         os.path.join(config["rnaseq"]["sf3b1mut"]["path"], "STAR", "bigwig_mapping-with_mapped_reads.tsv.gz"),
         os.path.join(config["rnaseq"]["sf3b1mut"]["path"], "STAR", "merged.second_pass.ReadsPerGene.out.tab.gz"),
         expand(
-            os.path.join(config["rnaseq"]["sf3b1mut"]["path"], "STAR", "{sample}", "second_pass.ssu.parquet"),
+            os.path.join(config["rnaseq"]["sf3b1mut"]["path"], "STAR", "{sample}", "paper_pass.ssu.parquet"),
             sample=SAMPLES,
         ),
 

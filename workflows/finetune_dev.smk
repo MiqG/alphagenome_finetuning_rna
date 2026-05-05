@@ -118,7 +118,7 @@ rule finetune_dev:
             for sample in DEV_SAMPLES
         ],
         ssu_parquets = [
-            os.path.join(DATA_DIR, "STAR", sample, "second_pass.ssu.parquet")
+            os.path.join(DATA_DIR, "STAR", sample, "paper_pass.ssu.parquet")
             for sample in DEV_SAMPLES
         ],
     output:

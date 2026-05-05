@@ -533,7 +533,7 @@ rule compute_ssu:
         bam = os.path.join(DATA_DIR,"STAR","{sample}","paper_pass.Aligned.sortedByCoord.out.filtered.bam"),
         filt_done = os.path.join(DATA_DIR,"STAR",".done_prep_bam","{sample}")
     output:
-        ssu = os.path.join(DATA_DIR,"STAR","{sample}","second_pass.ssu.parquet")
+        ssu = os.path.join(DATA_DIR,"STAR","{sample}","paper_pass.ssu.parquet")
     params:
         script = "src/alphagenome-pytorch/scripts/compute_ssu.py"
     threads: 1
