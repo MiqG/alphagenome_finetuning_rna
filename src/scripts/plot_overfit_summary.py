@@ -219,6 +219,49 @@ def page_final_correlations(summary_df: pd.DataFrame, runs: list[str], colors: l
 
 
 # --------------------------------------------------------------------------- #
+# Page 5 — splice-site auPRC over epochs
+# --------------------------------------------------------------------------- #
+
+AUPRC_COLS = {
+    "splice_site_auprc_donor_pos":    "donor+",
+    "splice_site_auprc_acceptor_pos": "acceptor+",
+    "splice_site_auprc_donor_neg":    "donor-",
+    "splice_site_auprc_acceptor_neg": "acceptor-",
+    "splice_site_auprc_macro":        "macro",
+}
+
+
+def page_auprc(epoch_dfs: list[pd.DataFrame], runs: list[str], colors: list) -> plt.Figure:
+    present_cols = {
+        col: label
+        for col, label in AUPRC_COLS.items()
+        if any(col in df.columns for df in epoch_dfs)
+    }
+    n_cols = max(len(present_cols), 1)
+    fig, axes = plt.subplots(1, n_cols, figsize=(4 * n_cols, 4), sharey=False)
+    if n_cols == 1:
+        axes = [axes]
+    fig.suptitle("Splice-site auPRC over epochs", fontsize=13, y=1.01)
+
+    for ax, (col, label) in zip(axes, present_cols.items()):
+        for df, run, color in zip(epoch_dfs, runs, colors):
+            if col not in df.columns:
+                continue
+            ax.plot(df["epoch"], df[col], label=RUN_LABELS.get(run, run), color=color)
+        ax.set_title(label, fontsize=9)
+        ax.set_xlabel("epoch")
+        ax.set_ylim(0, 1)
+        ax.axhline(0.2, color="grey", linewidth=0.7, linestyle="--", label="random (1/5)")
+        ax.grid(True, alpha=0.3)
+
+    axes[0].set_ylabel("auPRC")
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="upper right", fontsize=8, title="run")
+    fig.tight_layout()
+    return fig
+
+
+# --------------------------------------------------------------------------- #
 # Page 4 — junction recall scatter
 # --------------------------------------------------------------------------- #
 
@@ -284,13 +327,21 @@ def main() -> None:
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
+    has_auprc = any(
+        any(col in df.columns for col in AUPRC_COLS) for df in epoch_dfs
+    )
+
+    pages = [
+        page_loss_curves(epoch_dfs, train_epoch_dfs, runs, colors),
+        page_val_correlations(epoch_dfs, runs, colors),
+        page_final_correlations(summary_df, runs, colors),
+        page_junction_recall(summary_df, runs, colors),
+    ]
+    if has_auprc:
+        pages.append(page_auprc(epoch_dfs, runs, colors))
+
     with PdfPages(out_path) as pdf:
-        for fig in [
-            page_loss_curves(epoch_dfs, train_epoch_dfs, runs, colors),
-            page_val_correlations(epoch_dfs, runs, colors),
-            page_final_correlations(summary_df, runs, colors),
-            page_junction_recall(summary_df, runs, colors),
-        ]:
+        for fig in pages:
             pdf.savefig(fig, bbox_inches="tight")
             plt.close(fig)
 

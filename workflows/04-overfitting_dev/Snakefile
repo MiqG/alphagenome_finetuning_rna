@@ -1,23 +1,15 @@
 """
-Overfitting workflow: fine-tune AlphaGenome on 3 single density-tier intervals.
+Overfitting workflow: fine-tune AlphaGenome on the dev dataset (train/val split).
 
-Depends on outputs from 02-preprocess_data (data/prep/overfitting/single/{density}.bed).
-Each interval is overfitted independently for 50 epochs (constant LR, linear-probe mode)
-using paper_pass bigwigs and junction files from the 2 preprocessing samples.
+Depends on outputs from 02-preprocess_data (data/prep/overfitting/dev/train.bed,
+data/prep/overfitting/dev/valid.bed).
 
-Three experiment groups, each run on high / medium / low density intervals:
-
-  original            — baseline (randinit, no segmented loss, no GTF):
-                        5 modality-weight configs (all + 4 individual)
-
-  debug_splice_sites  — ablate head_init x segmented_loss x GTF:
-                        6 selected configs x 2 modality-weight sets
-
-  debug_splice_junctions — ablate rope_init x GTF:
-                        4 configs x 2 modality-weight sets
+One experiment group (debug_splice_junctions) with 4 runs total:
+  2 configs (truncrope_origloss, truncrope_newloss) x
+  2 modality-weight sets (junction_only, all)
 
 Run with:
-    snakemake -s workflows/03-overfitting_single/Snakefile --use-conda [-n]
+    snakemake -s workflows/04-overfitting_dev/Snakefile --use-conda [-n]
 """
 
 import os
@@ -26,111 +18,44 @@ configfile: "config/config.yaml"
 
 DATA_DIR        = config["rnaseq"]["sf3b1mut"]["path"]
 FINETUNE_SCRIPT = config["finetuning"]["alphagenome"]["finetune_script"]
-SINGLE_BED_DIR  = config["preprocessing"]["overfitting"]["single"]["output_dir"]
-OUTPUT_DIR      = "results/finetuning/alphagenome_pytorch/overfitting/single"
+DEV_BED_DIR     = config["preprocessing"]["overfitting"]["dev"]["output_dir"]
+OUTPUT_DIR      = "results/finetuning/alphagenome_pytorch/overfitting/dev"
 
 SAMPLES        = config["preprocessing"]["overfitting"]["samples"]
-DENSITIES      = config["preprocessing"]["overfitting"]["single"]["densities"]
 BIGWIG_STRANDS = ["forward", "reverse"]
 
 # ---------------------------------------------------------------------------
 # Run configuration
-# Each entry: modality_weights, init_strategy, use_gtf, loss_partitions, rope
+# Each entry: modality_weights, init_strategy, use_gtf, loss_partitions,
+#             rope, new_junction_loss
 # ---------------------------------------------------------------------------
 
-_ALL_MW  = "rna_seq:1.0,splice_site:1.0,splice_usage:1.0,splice_junctions:1.0"
-_SS_MW   = "rna_seq:0.0,splice_site:1.0,splice_usage:0.0,splice_junctions:0.0"
-_SJ_MW   = "rna_seq:0.0,splice_site:0.0,splice_usage:0.0,splice_junctions:1.0"
-_SEG_LP  = "rna_seq:8,splice_site:8,splice_usage:8"
+_ALL_MW = "rna_seq:1.0,splice_site:1.0,splice_usage:1.0,splice_junctions:1.0"
+_SJ_MW  = "rna_seq:0.0,splice_site:0.0,splice_usage:0.0,splice_junctions:1.0"
 
-_ORIGINAL_RUNS = {
-    "original__all": {
-        "modality_weights": _ALL_MW,
-        "init_strategy": "normal",
-        "use_gtf": False,
-        "loss_partitions": None,
-        "rope": "original",
-    },
-    "original__rna_seq_only": {
-        "modality_weights": "rna_seq:1.0,splice_site:0.0,splice_usage:0.0,splice_junctions:0.0",
-        "init_strategy": "normal",
-        "use_gtf": False,
-        "loss_partitions": None,
-        "rope": "original",
-    },
-    "original__splice_site_only": {
-        "modality_weights": _SS_MW,
-        "init_strategy": "normal",
-        "use_gtf": False,
-        "loss_partitions": None,
-        "rope": "original",
-    },
-    "original__splice_usage_only": {
-        "modality_weights": "rna_seq:0.0,splice_site:0.0,splice_usage:1.0,splice_junctions:0.0",
-        "init_strategy": "normal",
-        "use_gtf": False,
-        "loss_partitions": None,
-        "rope": "original",
-    },
-    "original__splice_junctions_only": {
-        "modality_weights": _SJ_MW,
-        "init_strategy": "normal",
-        "use_gtf": False,
-        "loss_partitions": None,
-        "rope": "original",
-    },
-}
-
-# 6 (head_init x segmented_loss x gtf_variant) configs x 2 modality-weight sets
-_SS_CONFIGS = [
-    ("randinit_noseg_gtf",  "normal",     None,    True),
-    ("randinit_seg_gtf",    "normal",     _SEG_LP, True),
-    ("randinit_seg_nogtf",  "normal",     _SEG_LP, False),
-    ("pretrinit_seg_nogtf", "pretrained", _SEG_LP, False),
-    ("pretrinit_seg_gtf",   "pretrained", _SEG_LP, True),
-    ("pretrinit_noseg_gtf", "pretrained", None,    True),
-]
-
-_DEBUG_SS_RUNS = {}
-for _cfg, _init, _lp, _gtf in _SS_CONFIGS:
-    for _mod_suffix, _mw in [("all", _ALL_MW), ("splice_site_only", _SS_MW)]:
-        _key = "debug_splice_sites__{}__{}" .format(_cfg, _mod_suffix)
-        _DEBUG_SS_RUNS[_key] = {
-            "modality_weights": _mw,
-            "init_strategy":    _init,
-            "use_gtf":          _gtf,
-            "loss_partitions":  _lp,
-            "rope":             "original",
-        }
-
-# 4 (rope_variant x gtf_variant) configs x 2 modality-weight sets
+# 2 (loss_variant) configs x 2 modality-weight sets
 _SJ_CONFIGS = [
-    ("origrope_gtf",   "original",  True),
-    ("origrope_nogtf", "original",  False),
-    ("truncrope_gtf",  "truncated", True),
-    ("truncrope_nogtf","truncated", False),
+    ("truncrope_origloss", False),
+    ("truncrope_newloss",  True),
 ]
 
 _DEBUG_SJ_RUNS = {}
-for _cfg, _rope, _gtf in _SJ_CONFIGS:
-    for _mod_suffix, _mw in [("all", _ALL_MW), ("junction_only", _SJ_MW)]:
+for _cfg, _new_loss in _SJ_CONFIGS:
+    for _mod_suffix, _mw in [("junction_only", _SJ_MW), ("all", _ALL_MW)]:
         _key = "debug_splice_junctions__{}__{}" .format(_cfg, _mod_suffix)
         _DEBUG_SJ_RUNS[_key] = {
-            "modality_weights": _mw,
-            "init_strategy":    "normal",
-            "use_gtf":          _gtf,
-            "loss_partitions":  None,
-            "rope":             _rope,
+            "modality_weights":  _mw,
+            "init_strategy":     "normal",
+            "use_gtf":           False,
+            "loss_partitions":   None,
+            "rope":              "truncated",
+            "new_junction_loss": _new_loss,
         }
 
 ALL_RUNS = {}
-ALL_RUNS.update(_ORIGINAL_RUNS)
-ALL_RUNS.update(_DEBUG_SS_RUNS)
 ALL_RUNS.update(_DEBUG_SJ_RUNS)
 
 _GROUP_RUNS = {
-    "original":               list(_ORIGINAL_RUNS.keys()),
-    "debug_splice_sites":     list(_DEBUG_SS_RUNS.keys()),
     "debug_splice_junctions": list(_DEBUG_SJ_RUNS.keys()),
 }
 
@@ -170,6 +95,13 @@ def _rope_arg(wildcards):
         return "--rope-init truncated_normal"
     return "--rope-init zeros"
 
+
+def _new_loss_arg(wildcards):
+    if ALL_RUNS[wildcards.run_name]["new_junction_loss"]:
+        return "--junction-loss normalized"
+    return "--junction-loss original"
+
+
 # ---------------------------------------------------------------------------
 # Rules
 # ---------------------------------------------------------------------------
@@ -177,8 +109,7 @@ def _rope_arg(wildcards):
 rule all:
     input:
         expand(
-            os.path.join(OUTPUT_DIR, "{density}", "{run_name}", "visualization", "summary_stats.parquet"),
-            density=DENSITIES,
+            os.path.join(OUTPUT_DIR, "{run_name}", "visualization", "summary_stats.parquet"),
             run_name=list(ALL_RUNS.keys()),
         ),
         expand(
@@ -187,16 +118,16 @@ rule all:
         ),
 
 
-rule overfit_single:
-    """Fine-tune AlphaGenome on a single density-tier interval for overfitting experiments."""
+rule overfit_dev:
+    """Fine-tune AlphaGenome on the dev dataset (train/val split) for overfitting experiments."""
     wildcard_constraints:
-        density  = "|".join(DENSITIES),
         run_name = "|".join(ALL_RUNS.keys()),
     input:
         weights        = config["alphagenome_pytorch"]["paths"]["weights"],
         genome         = config["gencode"]["paths"]["fasta"],
         gtf_parquet    = config["gencode"]["paths"]["gtf_parquet"],
-        bed            = os.path.join(SINGLE_BED_DIR, "{density}.bed"),
+        train_bed      = os.path.join(DEV_BED_DIR, "train.bed"),
+        val_bed        = os.path.join(DEV_BED_DIR, "valid.bed"),
         bigwigs        = [
             os.path.join(DATA_DIR, "STAR", sample,
                          "paper_pass.Aligned.sortedByCoord.out.filtered." + strand + ".bw")
@@ -212,7 +143,7 @@ rule overfit_single:
             for sample in SAMPLES
         ],
     output:
-        checkpoint = os.path.join(OUTPUT_DIR, "{density}", "{run_name}", "best_model.pth"),
+        checkpoint = os.path.join(OUTPUT_DIR, "{run_name}", "best_model.pth"),
     params:
         num_gpus                    = 1,
         modality_bigwig             = config["finetuning"]["alphagenome"]["sf3b1mut"]["modality_bigwig"],
@@ -225,13 +156,13 @@ rule overfit_single:
         gradient_accumulation_steps = 1,
         track_means_samples         = config["finetuning"]["alphagenome"]["sf3b1mut"]["track_means_samples"],
         save_every_steps            = 50,
-        save_every                  = 9999,
-        output_dir                  = os.path.join(OUTPUT_DIR, "{density}"),
+        output_dir                  = OUTPUT_DIR,
         modality_weights            = _modality_weights,
         pretrained_head_arg         = _pretrained_head_arg,
         gtf_arg                     = _gtf_arg,
         loss_partitions_arg         = _loss_partitions_arg,
         rope_arg                    = _rope_arg,
+        new_loss_arg                = _new_loss_arg,
     threads: 6
     resources:
         gres      = "gpu:7g.80gb:1",
@@ -257,8 +188,8 @@ rule overfit_single:
             --genome {input.genome} \
             --modality {params.modality_bigwig} --bigwig {input.bigwigs} \
             --modality {params.modality_splicing} --star-junctions {input.star_junctions} --ssu {input.ssu_parquets} \
-            --train-bed {input.bed} \
-            --val-bed {input.bed} \
+            --train-bed {input.train_bed} \
+            --val-bed {input.val_bed} \
             --pretrained-weights {input.weights} \
             --gradient-checkpointing \
             --resume auto \
@@ -272,14 +203,14 @@ rule overfit_single:
             --sequence-length {params.sequence_length} \
             --track-means-samples {params.track_means_samples} \
             --save-every-steps {params.save_every_steps} \
-            --save-every {params.save_every} \
             --run-name {wildcards.run_name} \
             --max-grad-norm inf \
             --seed 1234 \
             {params.pretrained_head_arg} \
             {params.gtf_arg} \
             {params.loss_partitions_arg} \
-            {params.rope_arg}
+            {params.rope_arg} \
+            {params.new_loss_arg}
 
         rm -f "$FINETUNE_SCRIPT"
 
@@ -289,14 +220,13 @@ rule overfit_single:
         """
 
 
-rule visualize_single:
-    """Visualize predictions vs real tracks for genes overlapping the overfitting interval."""
+rule visualize_dev:
+    """Visualize predictions vs real tracks for genes overlapping the dev val intervals."""
     wildcard_constraints:
-        density  = "|".join(DENSITIES),
         run_name = "|".join(ALL_RUNS.keys()),
     input:
-        checkpoint     = os.path.join(OUTPUT_DIR, "{density}", "{run_name}", "best_model.pth"),
-        bed            = os.path.join(SINGLE_BED_DIR, "{density}.bed"),
+        checkpoint     = os.path.join(OUTPUT_DIR, "{run_name}", "best_model.pth"),
+        bed            = os.path.join(DEV_BED_DIR, "valid.bed"),
         genome         = config["gencode"]["paths"]["fasta"],
         gtf            = config["gencode"]["paths"]["gtf"],
         gtf_parquet    = config["gencode"]["paths"]["gtf_parquet"],
@@ -315,14 +245,14 @@ rule visualize_single:
             for sample in SAMPLES
         ],
     output:
-        summary = os.path.join(OUTPUT_DIR, "{density}", "{run_name}", "visualization", "summary_stats.parquet"),
+        summary = os.path.join(OUTPUT_DIR, "{run_name}", "visualization", "summary_stats.parquet"),
     params:
-        script    = "src/scripts/visualize_overfit.py",
+        script          = "src/scripts/visualize_overfit.py",
         sequence_length = config["finetuning"]["alphagenome"]["sf3b1mut"]["sequence_length"],
-        viz_dir   = lambda wildcards: os.path.join(
-            OUTPUT_DIR, wildcards.density, wildcards.run_name, "visualization"
+        viz_dir         = lambda wildcards: os.path.join(
+            OUTPUT_DIR, wildcards.run_name, "visualization"
         ),
-        gtf_arg   = lambda wildcards, input: (
+        gtf_arg         = lambda wildcards, input: (
             "--gtf-splice-sites {}".format(input.gtf_parquet)
             if ALL_RUNS[wildcards.run_name]["use_gtf"]
             else ""
@@ -346,13 +276,12 @@ rule visualize_single:
 
 
 rule plot_group_summary:
-    """Plot training dynamics and prediction correlations for all runs in an experiment group."""
+    """Plot training dynamics and junction correlations for all runs in the experiment group."""
     wildcard_constraints:
         group = "|".join(_GROUP_RUNS.keys()),
     input:
         summaries = lambda wildcards: expand(
-            os.path.join(OUTPUT_DIR, "{density}", "{run_name}", "visualization", "summary_stats.parquet"),
-            density=DENSITIES,
+            os.path.join(OUTPUT_DIR, "{run_name}", "visualization", "summary_stats.parquet"),
             run_name=_GROUP_RUNS[wildcards.group],
         ),
     output:
@@ -360,8 +289,7 @@ rule plot_group_summary:
     params:
         script   = "src/scripts/plot_overfit_summary.py",
         run_dirs = lambda wildcards: [
-            os.path.join(OUTPUT_DIR, density, run_name)
-            for density in DENSITIES
+            os.path.join(OUTPUT_DIR, run_name)
             for run_name in _GROUP_RUNS[wildcards.group]
         ],
     conda:

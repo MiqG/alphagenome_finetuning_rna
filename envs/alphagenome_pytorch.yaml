@@ -17,3 +17,4 @@ dependencies:
       - scipy>=1.11
       - matplotlib>=3.8
       - pyarrow>=14.0
+      - scikit-learn

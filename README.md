@@ -83,5 +83,30 @@
 
    Output: `results/finetuning/alphagenome_pytorch/overfitting/single/`
 
+4. overfitting dev dataset (`workflows/04-overfitting_dev/Snakefile`)
+
+   ```bash
+   snakemake -s workflows/04-overfitting_dev/Snakefile --use-conda -j <cores>
+   ```
+   
+   Overfits AlphaGenome for 50 epochs (constant LR, no warmup, linear-probe mode) on the dev
+   dataset (train/val split) from `02-preprocess_data`. All runs use `paper_pass` bigwigs and
+   junction files from the 2 preprocessing samples (SRR17111303, SRR17111311).
+
+   One experiment group:
+
+   - **debug_splice_junctions** — ablate junction loss formulation with truncated rope initialization.
+     Two configurations (loss_variant):
+      1. truncated rope, original junction loss (`truncrope_origloss`)
+      2. truncated rope, new junction loss (`truncrope_newloss`)
+     Each config runs twice: `junction_only` (weight 1.0) and `all` (all modalities 1.0).
+      - store: train/val losses (total + per modality), correlations per epoch
+      - plot: loss curves and junction correlations across configs along epochs
+
+   Output: `results/finetuning/alphagenome_pytorch/overfitting/dev/`
+
+5. sequence parallelization
+
+
       
 
