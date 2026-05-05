@@ -1,0 +1,121 @@
+"""
+Preprocessing workflow: select BED intervals for overfitting experiments.
+
+Reads FOLD_1 intervals, scores them by splice junction activity (total
+uniquely-mapped junction reads across PREP_SAMPLES from STAR SJ.out.tab
+files), and writes two output sets:
+
+  single intervals  — one BED per density tier (high / medium / low)
+                      used by 03-overfitting_single
+  dev intervals     — train.bed (120 top + 50 random) and
+                      valid.bed (20 top + 10 random)
+                      used by 04-overfitting_dev
+
+Run with:
+    snakemake -s workflows/02-preprocess_data/Snakefile --use-conda [-n]
+"""
+
+import os
+
+configfile: "config/config.yaml"
+
+PREP_CFG  = config["preprocessing"]["overfitting"]
+FOLDS_DIR = config["finetuning"]["alphagenome"]["folds_dir"]
+DATA_DIR  = config["rnaseq"]["sf3b1mut"]["path"]
+
+SAMPLES    = PREP_CFG["samples"]
+FOLD       = PREP_CFG["fold"]
+DENSITIES  = PREP_CFG["single"]["densities"]
+SINGLE_DIR = PREP_CFG["single"]["output_dir"]
+DEV_DIR    = PREP_CFG["dev"]["output_dir"]
+
+STAR_JUNCTIONS = [
+    os.path.join(DATA_DIR, "STAR", s, "paper_pass.SJ.out.tab")
+    for s in SAMPLES
+]
+
+_N_BY_SPLIT = {
+    "train": (PREP_CFG["dev"]["n_train_top"], PREP_CFG["dev"]["n_train_random"]),
+    "valid": (PREP_CFG["dev"]["n_val_top"],   PREP_CFG["dev"]["n_val_random"]),
+}
+
+
+rule all:
+    input:
+        os.path.join(SINGLE_DIR, "interval_ranking.tsv.gz"),
+        expand(os.path.join(SINGLE_DIR, "{density}.bed"), density=DENSITIES),
+        expand(os.path.join(DEV_DIR, "{split}.bed"), split=["train", "valid"]),
+
+
+rule rank_intervals:
+    """Rank all FOLD train intervals by splice junction activity and write the table."""
+    input:
+        bed            = os.path.join(FOLDS_DIR, FOLD, "train.bed"),
+        star_junctions = STAR_JUNCTIONS,
+    output:
+        ranking = os.path.join(SINGLE_DIR, "interval_ranking.tsv.gz"),
+    params:
+        script  = "src/scripts/select_density_intervals.py",
+        density = "high",
+    conda:
+        "alphagenome_finetuning_rna"
+    shell:
+        """
+        python {params.script} \
+            --bed {input.bed} \
+            --star-junctions {input.star_junctions} \
+            --density {params.density} \
+            --output-ranking {output.ranking}
+        """
+
+
+rule select_single_intervals:
+    """Select one interval per density tier (high/medium/low) from FOLD train.bed."""
+    wildcard_constraints:
+        density = "high|medium|low",
+    input:
+        bed            = os.path.join(FOLDS_DIR, FOLD, "train.bed"),
+        star_junctions = STAR_JUNCTIONS,
+    output:
+        bed = os.path.join(SINGLE_DIR, "{density}.bed"),
+    params:
+        script  = "src/scripts/select_density_intervals.py",
+        density = "{density}",
+    conda:
+        "alphagenome_finetuning_rna"
+    shell:
+        """
+        python {params.script} \
+            --bed {input.bed} \
+            --star-junctions {input.star_junctions} \
+            --density {params.density} \
+            --output {output.bed}
+        """
+
+
+rule select_dev_intervals:
+    """Select top-N + random intervals from FOLD train/valid.bed for dev finetuning."""
+    wildcard_constraints:
+        split = "train|valid",
+    input:
+        bed            = os.path.join(FOLDS_DIR, FOLD, "{split}.bed"),
+        star_junctions = STAR_JUNCTIONS,
+    output:
+        bed = os.path.join(DEV_DIR, "{split}.bed"),
+    params:
+        script   = "src/scripts/select_top_intervals.py",
+        n        = lambda wc: _N_BY_SPLIT[wc.split][0],
+        n_random = lambda wc: _N_BY_SPLIT[wc.split][1],
+        seed     = PREP_CFG["dev"]["seed"],
+    conda:
+        "alphagenome_finetuning_rna"
+    shell:
+        """
+        python {params.script} \
+            --bed {input.bed} \
+            --star-junctions {input.star_junctions} \
+            --n {params.n} \
+            --n-random {params.n_random} \
+            --seed {params.seed} \
+            --output {output.bed}
+        """

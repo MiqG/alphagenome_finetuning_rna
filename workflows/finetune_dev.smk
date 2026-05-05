@@ -31,20 +31,15 @@ configfile: "config/config.yaml"
 
 DATA_DIR        = config["rnaseq"]["sf3b1mut"]["path"]
 FINETUNE_SCRIPT = config["finetuning"]["alphagenome"]["finetune_script"]
-FOLDS_DIR       = config["finetuning"]["alphagenome"]["folds_dir"]
 DEV_OUTPUT_DIR  = config["finetuning"]["alphagenome"]["sf3b1mut"]["output_dir"].replace("sf3b1mut", "dev")
+DEV_BED_DIR     = config["preprocessing"]["overfitting"]["dev"]["output_dir"]
 
-# DEV_SAMPLES    = ["SRR17111301", "SRR17111311"]
-DEV_SAMPLES = ["SRR17111303","SRR17111311"]
+DEV_SAMPLES    = config["preprocessing"]["overfitting"]["samples"]
 BIGWIG_STRANDS = ["forward", "reverse"]
-N_TRAIN_TOP      = 120
-N_TRAIN_RANDOM   = 50
-N_VAL_TOP        = 20
-N_VAL_RANDOM     = 10
-N_TRAIN_INTERVALS = N_TRAIN_TOP + N_TRAIN_RANDOM
-N_VAL_INTERVALS   = N_VAL_TOP + N_VAL_RANDOM
-N_INTERVALS_BY_SPLIT = {"train": N_TRAIN_TOP, "valid": N_VAL_TOP}
-N_RANDOM_BY_SPLIT    = {"train": N_TRAIN_RANDOM, "valid": N_VAL_RANDOM}
+N_TRAIN_INTERVALS = (
+    config["preprocessing"]["overfitting"]["dev"]["n_train_top"]
+    + config["preprocessing"]["overfitting"]["dev"]["n_train_random"]
+)
 JUNCTION_TOP_K = 512
 SEEDS = [0]#[0, 1]
 EPOCHS = 10
@@ -102,37 +97,6 @@ rule all:
         os.path.join(DEV_OUTPUT_DIR, "run", "summary.pdf"),
 
 
-rule select_top_intervals:
-    """Select top N intervals from a FOLD_1 BED file ranked by splice junction activity."""
-    wildcard_constraints:
-        split = "train|valid",
-    input:
-        bed            = os.path.join(FOLDS_DIR, "FOLD_1", "{split}.bed"),
-        star_junctions = [
-            os.path.join(DATA_DIR, "STAR", sample, "second_pass.SJ.out.tab")
-            for sample in DEV_SAMPLES
-        ],
-    output:
-        bed = os.path.join(DEV_OUTPUT_DIR, "beds", "{split}.bed"),
-    params:
-        script   = "src/scripts/select_top_intervals.py",
-        n        = lambda wc: N_INTERVALS_BY_SPLIT[wc.split],
-        n_random = lambda wc: N_RANDOM_BY_SPLIT[wc.split],
-        seed     = 42,
-    conda:
-        "alphagenome_finetuning_rna"
-    shell:
-        """
-        python {params.script} \
-            --bed {input.bed} \
-            --star-junctions {input.star_junctions} \
-            --n {params.n} \
-            --n-random {params.n_random} \
-            --seed {params.seed} \
-            --output {output.bed}
-        """
-
-
 rule finetune_dev:
     """Fine-tune AlphaGenome on the dev subset using precomputed SSU parquets."""
     wildcard_constraints:
@@ -141,8 +105,8 @@ rule finetune_dev:
         weights      = config["alphagenome_pytorch"]["paths"]["weights"],
         genome       = config["gencode"]["paths"]["fasta"],
         gtf_parquet  = config["gencode"]["paths"]["gtf_parquet"],
-        train_bed    = os.path.join(DEV_OUTPUT_DIR, "beds", "train.bed"),
-        val_bed      = os.path.join(DEV_OUTPUT_DIR, "beds", "valid.bed"),
+        train_bed    = os.path.join(DEV_BED_DIR, "train.bed"),
+        val_bed      = os.path.join(DEV_BED_DIR, "valid.bed"),
         bigwigs      = [
             os.path.join(DATA_DIR, "STAR", sample,
                          "second_pass.Aligned.sortedByCoord.out.filtered." + strand + ".bw")

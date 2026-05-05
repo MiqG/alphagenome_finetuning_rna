@@ -75,6 +75,21 @@ finetuning:
       track_means_samples: 500  # intervals to sample for track mean estimation (subset for speed)
       save_every_steps: 500
 
+preprocessing:
+  overfitting:
+    samples: ["SRR17111303", "SRR17111311"]
+    fold: "FOLD_1"
+    single:
+      output_dir: "data/prep/overfitting/single"
+      densities: ["high", "medium", "low"]
+    dev:
+      output_dir: "data/prep/overfitting/dev"
+      n_train_top: 120
+      n_train_random: 50
+      n_val_top: 20
+      n_val_random: 10
+      seed: 42
+
 examples:
   alphagenome:
     output_dir: "results/examples/alphagenome_pytorch"

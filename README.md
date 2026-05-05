@@ -26,9 +26,17 @@
       - download model weights (AlphaGenome-PyTorch)
       - download and prepare genome interval folds (Borzoi hg38 sequences.bed)
 
-2. preprocess data
-   - single intervals to overfit: select intervals with many, medium and few splice junctions
-   - dev dataset intervals with top intervals to overfit: 120 top for training 50 random, and 20 top and 10 random for validating
+2. preprocess data (`workflows/02-preprocess_data/Snakefile`)
+
+   ```bash
+   snakemake -s workflows/02-preprocess_data/Snakefile --use-conda -j <cores>
+   ```
+   - single intervals to overfit: select one interval per density tier (high / medium / low) from FOLD_1 train.bed, ranked by total uniquely-mapped junction reads across samples
+      - output: `data/prep/overfitting/single/{high,medium,low}.bed`
+   - dev dataset intervals: select top-N + random intervals from FOLD_1 train/valid.bed
+      - train: 120 top + 50 random
+      - valid: 20 top + 10 random
+      - output: `data/prep/overfitting/dev/{train,valid}.bed`
 
 3. overfitting single
    - experiments
