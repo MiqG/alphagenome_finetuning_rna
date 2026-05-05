@@ -41,7 +41,20 @@ PALETTE = ["#4C72B0", "#DD8452", "#55A868", "#C44E52", "#8172B2",
 # --------------------------------------------------------------------------- #
 
 def load_epoch_log(run_dir: Path) -> pd.DataFrame:
-    df = pd.read_csv(run_dir / "epoch_log.csv")
+    import csv as _csv
+    path = run_dir / "epoch_log.csv"
+    with open(path, newline="") as f:
+        rows = list(_csv.reader(f))
+    if not rows:
+        return pd.DataFrame()
+    ncols = max(len(r) for r in rows)
+    header = rows[0] + [f"_extra{i}" for i in range(len(rows[0]), ncols)]
+    data = [r + [""] * (ncols - len(r)) for r in rows[1:]]
+    df = pd.DataFrame(data, columns=header)
+    for col in df.columns:
+        converted = pd.to_numeric(df[col], errors="coerce")
+        if converted.notna().any():
+            df[col] = converted
     df["run_name"] = run_dir.name
     return df
 
@@ -50,16 +63,6 @@ def load_training_log(run_dir: Path) -> pd.DataFrame:
     df = pd.read_csv(run_dir / "training_log.csv")
     df["run_name"] = run_dir.name
     return df
-
-
-def load_eval_metrics(run_dir: Path) -> dict | None:
-    """Load eval_only_metrics.json if present, else None."""
-    import json
-    metrics_file = run_dir / "eval_only_metrics.json"
-    if not metrics_file.exists():
-        return None
-    with open(metrics_file) as f:
-        return json.load(f)
 
 
 def smooth(values: np.ndarray, window: int = 20) -> np.ndarray:
@@ -351,48 +354,51 @@ def page_corr_bar(epoch_dfs, runs, colors, epoch=5):
 # Diagnostics page
 # --------------------------------------------------------------------------- #
 
-def page_eval_diagnostics(run_dirs: list[Path], runs: list[str]) -> plt.Figure | None:
-    """Plot evaluation diagnostics (Pearson variants) if available."""
-    eval_metrics = [load_eval_metrics(d) for d in run_dirs]
-    if not any(eval_metrics):
+_DIAG_COLS = [
+    ("splice_junctions_pearson_r",                "full_r"),
+    ("splice_junctions_pearson_r_nonzero",         "nonzero_r"),
+    ("splice_junctions_pearson_r_donor_marginal",  "donor_marg_r"),
+    ("splice_junctions_pearson_r_acceptor_marginal", "accept_marg_r"),
+    ("val_loss_splice_junctions_target_nonzero_frac", "target_nz_frac"),
+]
+
+
+def page_eval_diagnostics(epoch_dfs: list[pd.DataFrame], runs: list[str]) -> plt.Figure | None:
+    """Table of splice junction diagnostics from the last epoch of each run."""
+    present_cols = [
+        (col, label) for col, label in _DIAG_COLS
+        if any(col in df.columns for df in epoch_dfs)
+    ]
+    if not present_cols:
         return None
 
-    fig, ax = plt.subplots(figsize=(20 * cm, 12 * cm))
-    ax.axis("off")
-
-    # Build table data
-    rows = [["run_name", "full_r", "nonzero_r", "donor_marg_r", "accept_marg_r", "target_nz_frac"]]
-    for run_name, metrics in zip(runs, eval_metrics):
-        if metrics is None:
-            rows.append([run_name] + ["—"] * 5)
-            continue
-        row = [
-            run_name[:20],  # truncate long names
-            f"{metrics.get('splice_junctions_pearson_r', float('nan')):.4f}",
-            f"{metrics.get('splice_junctions_pearson_r_nonzero', float('nan')):.4f}",
-            f"{metrics.get('splice_junctions_pearson_r_donor_marginal', float('nan')):.4f}",
-            f"{metrics.get('splice_junctions_pearson_r_acceptor_marginal', float('nan')):.4f}",
-            f"{metrics.get('splice_junctions_target_nonzero_frac', float('nan')):.4f}",
-        ]
+    header = ["run_name"] + [label for _, label in present_cols]
+    rows = [header]
+    for df, run_name in zip(epoch_dfs, runs):
+        last = df.iloc[-1]
+        row = [run_name[:20]]
+        for col, _ in present_cols:
+            val = last[col] if col in last.index else float("nan")
+            row.append(f"{val:.4f}" if not np.isnan(float(val)) else "—")
         rows.append(row)
 
-    table = ax.table(cellText=rows, cellLoc="center", loc="center",
-                    colWidths=[0.2, 0.15, 0.15, 0.15, 0.15, 0.15])
+    n_cols = len(header)
+    col_widths = [0.25] + [0.15] * (n_cols - 1)
+    fig, ax = plt.subplots(figsize=(20 * cm, 12 * cm))
+    ax.axis("off")
+    table = ax.table(cellText=rows, cellLoc="center", loc="center", colWidths=col_widths)
     table.auto_set_font_size(False)
     table.set_fontsize(10)
 
-    # Style header row
-    for i in range(6):
+    for i in range(n_cols):
         table[(0, i)].set_facecolor("#CCCCCC")
         table[(0, i)].set_text_props(weight="bold")
-
-    # Alternate row colors
     for i in range(1, len(rows)):
         color = "#F0F0F0" if i % 2 else "#FFFFFF"
-        for j in range(6):
+        for j in range(n_cols):
             table[(i, j)].set_facecolor(color)
 
-    fig.suptitle("Splice Junction Pearson Diagnostics", fontsize=14, weight="bold", y=0.98)
+    fig.suptitle("Splice Junction Pearson Diagnostics (last epoch)", fontsize=14, weight="bold", y=0.98)
     return fig
 
 
@@ -432,7 +438,7 @@ def main() -> None:
             page_step_loss(train_dfs, runs, colors, args.smooth),
             page_loss_bar(epoch_dfs, runs, colors, args.summary_epoch),
             page_corr_bar(epoch_dfs, runs, colors, args.summary_epoch),
-            page_eval_diagnostics(run_dirs, runs),
+            page_eval_diagnostics(epoch_dfs, runs),
         ]
         for fig in pages:
             if fig is not None:
