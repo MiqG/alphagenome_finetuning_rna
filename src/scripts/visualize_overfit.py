@@ -46,8 +46,10 @@ from alphagenome_pytorch.extensions.finetuning.star_junctions import (
     read_star_junctions,
     normalize_junctions_per_sample,
     junctions_to_classification_array,
-    junctions_to_usage_arrays_by_strand,
+    junctions_to_ssu_approx_arrays_by_strand,
     junctions_to_junction_matrix,
+    read_ssu_parquet,
+    ssu_to_arrays_by_strand,
 )
 
 
@@ -381,22 +383,22 @@ def plot_gene_sample(
     # Row 2: Predicted splice donor
     _mirror_row(axes[2], pred_donor_pos, pred_donor_neg, "forestgreen")
     axes[2].set_title(f"Predicted splice donor prob (+ above / − below)  ·  {_corr_str(donor_corr)}", fontsize=7, color="forestgreen")
-    _style(axes[2], "Donor\n(pred)", ylim=(-1, 1))
+    _style(axes[2], "Donor\n(pred)")
 
     # Row 3: Real splice donor sites
     _mirror_sites_row(axes[3], real_donor_pos, real_donor_neg, "forestgreen")
     axes[3].set_title("Real splice donor sites (STAR, + above / − below)", fontsize=7, color="forestgreen")
-    _style(axes[3], "Donor\n(real)", ylim=(-1.2, 1.2))
+    _style(axes[3], "Donor\n(real)")
 
     # Row 4: Predicted splice acceptor
     _mirror_row(axes[4], pred_acceptor_pos, pred_acceptor_neg, "darkorange")
     axes[4].set_title(f"Predicted splice acceptor prob (+ above / − below)  ·  {_corr_str(acceptor_corr)}", fontsize=7, color="darkorange")
-    _style(axes[4], "Acceptor\n(pred)", ylim=(-1, 1))
+    _style(axes[4], "Acceptor\n(pred)")
 
     # Row 5: Real splice acceptor sites
     _mirror_sites_row(axes[5], real_acceptor_pos, real_acceptor_neg, "darkorange")
     axes[5].set_title("Real splice acceptor sites (STAR, + above / − below)", fontsize=7, color="darkorange")
-    _style(axes[5], "Acceptor\n(real)", ylim=(-1.2, 1.2))
+    _style(axes[5], "Acceptor\n(real)")
 
     # Row 6: Predicted splice usage
     _mirror_row(axes[6], pred_usage_pos, pred_usage_neg, "mediumpurple")
@@ -467,6 +469,11 @@ def main():
         "--star-junctions", nargs="*", default=[],
         help="STAR SJ.out.tab files, one per sample in the same order",
     )
+    parser.add_argument(
+        "--ssu", nargs="*", default=[],
+        help="SSU parquet files, one per sample (produced by compute_ssu.py); "
+             "if omitted, falls back to SSU approximation from STAR junctions",
+    )
     parser.add_argument("--sequence-length", type=int, default=1048576)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--gtf-splice-sites", default=None,
@@ -481,6 +488,8 @@ def main():
     n_samples = len(args.bigwig) // n_strands
     if args.star_junctions and len(args.star_junctions) != n_samples:
         raise ValueError(f"Expected {n_samples} STAR junction files, got {len(args.star_junctions)}")
+    if args.ssu and len(args.ssu) != n_samples:
+        raise ValueError(f"Expected {n_samples} SSU parquet files, got {len(args.ssu)}")
 
     # Infer sample names from parent directory of the fwd bigwig of each sample
     sample_names = [Path(args.bigwig[2 * i]).parent.name for i in range(n_samples)]
@@ -542,9 +551,15 @@ def main():
                     cls_arr_real = junctions_to_classification_array(
                         [junc_df], chrom, padded_start, args.sequence_length
                     )
-                    real_usage_pos, real_usage_neg = junctions_to_usage_arrays_by_strand(
-                        junc_df, chrom, padded_start, args.sequence_length
-                    )
+                    if s_idx < len(args.ssu):
+                        ssu_df = read_ssu_parquet(args.ssu[s_idx], chrom, padded_start, padded_end)
+                        real_usage_pos, real_usage_neg = ssu_to_arrays_by_strand(
+                            ssu_df, chrom, padded_start, args.sequence_length
+                        )
+                    else:
+                        real_usage_pos, real_usage_neg = junctions_to_ssu_approx_arrays_by_strand(
+                            junc_df, chrom, padded_start, args.sequence_length
+                        )
                     ssp_real, junc_matrix = junctions_to_junction_matrix(
                         [junc_df], cls_arr_real, chrom, padded_start, args.sequence_length
                     )

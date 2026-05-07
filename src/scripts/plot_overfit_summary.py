@@ -38,24 +38,35 @@ RUN_LABELS = {
     "splice_usage_only": "splice_usage",
     "splice_junctions_only": "splice_junctions",
 }
-PALETTE = ["#4C72B0", "#DD8452", "#55A868", "#C44E52", "#8172B2"]
+_BASE_PALETTE = ["#4C72B0", "#DD8452", "#55A868", "#C44E52", "#8172B2"]
+
+
+def make_palette(n: int) -> list:
+    if n <= len(_BASE_PALETTE):
+        return _BASE_PALETTE[:n]
+    import matplotlib.cm as cm
+    return [cm.tab20(i / max(n - 1, 1)) for i in range(n)]
 
 
 # --------------------------------------------------------------------------- #
 # Data loading
 # --------------------------------------------------------------------------- #
 
+def _run_id(run_dir: Path) -> str:
+    return run_dir.parent.name + "/" + run_dir.name
+
+
 def load_epoch_log(run_dir: Path) -> pd.DataFrame:
     path = run_dir / "epoch_log.csv"
     df = pd.read_csv(path)
-    df["run_name"] = run_dir.name
+    df["run_name"] = _run_id(run_dir)
     return df
 
 
 def load_training_log(run_dir: Path) -> pd.DataFrame:
     path = run_dir / "training_log.csv"
     df = pd.read_csv(path)
-    df["run_name"] = run_dir.name
+    df["run_name"] = _run_id(run_dir)
     return df
 
 
@@ -68,7 +79,7 @@ def aggregate_training_log_per_epoch(df: pd.DataFrame) -> pd.DataFrame:
 def load_summary_stats(run_dir: Path) -> pd.DataFrame:
     path = run_dir / "visualization" / "summary_stats.parquet"
     df = pd.read_parquet(path)
-    df["run_name"] = run_dir.name
+    df["run_name"] = _run_id(run_dir)
     return df
 
 
@@ -186,7 +197,7 @@ def page_final_correlations(summary_df: pd.DataFrame, runs: list[str], colors: l
     fig.suptitle("Final prediction correlations (per gene × sample)", fontsize=13, y=1.01)
 
     color_map = {run: c for run, c in zip(runs, colors)}
-    run_order = [r for r in RUN_ORDER if r in runs]
+    run_order = runs
     x_positions = {run: i for i, run in enumerate(run_order)}
 
     for ax, (col, label) in zip(axes, SUMMARY_CORR_COLS.items()):
@@ -266,7 +277,7 @@ def page_auprc(epoch_dfs: list[pd.DataFrame], runs: list[str], colors: list) -> 
 # --------------------------------------------------------------------------- #
 
 def page_junction_recall(summary_df: pd.DataFrame, runs: list[str], colors: list) -> plt.Figure:
-    run_order = [r for r in RUN_ORDER if r in runs]
+    run_order = runs
     n_cols = len(run_order)
     fig, axes = plt.subplots(1, n_cols, figsize=(3.5 * n_cols, 4), sharey=True, sharex=True)
     fig.suptitle("Junction recall: predicted vs real count", fontsize=13, y=1.01)
@@ -313,11 +324,11 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     run_dirs = [Path(d) for d in args.run_dirs]
-    runs = [d.name for d in run_dirs]
+    runs = [_run_id(d) for d in run_dirs]
     run_order = [r for r in RUN_ORDER if r in runs] + [r for r in runs if r not in RUN_ORDER]
-    run_dirs = sorted(run_dirs, key=lambda d: run_order.index(d.name) if d.name in run_order else 999)
-    runs = [d.name for d in run_dirs]
-    colors = PALETTE[: len(runs)]
+    run_dirs = sorted(run_dirs, key=lambda d: run_order.index(_run_id(d)) if _run_id(d) in run_order else 999)
+    runs = [_run_id(d) for d in run_dirs]
+    colors = make_palette(len(runs))
 
     epoch_dfs = [load_epoch_log(d) for d in run_dirs]
     train_epoch_dfs = [aggregate_training_log_per_epoch(load_training_log(d)) for d in run_dirs]
