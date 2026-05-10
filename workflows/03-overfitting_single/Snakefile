@@ -30,7 +30,7 @@ SINGLE_BED_DIR  = config["preprocessing"]["overfitting"]["single"]["output_dir"]
 OUTPUT_DIR      = "results/finetuning/alphagenome_pytorch/overfitting/single"
 
 SAMPLES        = config["preprocessing"]["overfitting"]["samples"]
-DENSITIES      = config["preprocessing"]["overfitting"]["single"]["densities"]
+DENSITIES      = ["medium"]
 BIGWIG_STRANDS = ["forward", "reverse"]
 
 # ---------------------------------------------------------------------------
@@ -91,7 +91,7 @@ _SS_CONFIGS = [
 
 _DEBUG_SS_RUNS = {}
 for _cfg, _init, _ns, _gtf in _SS_CONFIGS:
-    for _mod_suffix, _mw in [("all", _ALL_MW), ("splice_site_only", _SS_MW)]:
+    for _mod_suffix, _mw in [("all", _ALL_MW)]:#, ("splice_site_only", _SS_MW)]:
         _key = "debug_splice_sites__{}__{}" .format(_cfg, _mod_suffix)
         _DEBUG_SS_RUNS[_key] = {
             "modality_weights": _mw,
@@ -101,8 +101,13 @@ for _cfg, _init, _ns, _gtf in _SS_CONFIGS:
             "rope":             "original",
         }
 
-# 4 (rope_variant x gtf_variant) configs x 2 modality-weight sets
-_SJ_CONFIGS = [
+# annotated mode: randinit + nogtf x 2 rope x 2 loss  (4 runs)
+# predicted mode: pretrinit x gtf/nogtf x 2 rope x 2 loss  (8 runs)
+_SJ_ANNOTATED_ROPES = [
+    ("origrope",  "original"),
+    ("truncrope", "truncated"),
+]
+_SJ_PREDICTED_CONFIGS = [
     ("origrope_gtf",   "original",  True),
     ("origrope_nogtf", "original",  False),
     ("truncrope_gtf",  "truncated", True),
@@ -110,28 +115,46 @@ _SJ_CONFIGS = [
 ]
 
 _DEBUG_SJ_RUNS = {}
-for _cfg, _rope, _gtf in _SJ_CONFIGS:
-    for _mod_suffix, _mw in [("all", _ALL_MW), ("junction_only", _SJ_MW)]:
-        _key = "debug_splice_junctions__{}__{}" .format(_cfg, _mod_suffix)
-        _DEBUG_SJ_RUNS[_key] = {
-            "modality_weights": _mw,
-            "init_strategy":    "normal",
-            "use_gtf":          _gtf,
-            "num_segments":     None,
-            "rope":             _rope,
-        }
+for _cfg, _rope in _SJ_ANNOTATED_ROPES:
+    for _loss_suffix, _new_loss in [("origloss", False), ("newloss", True)]:
+        for _mod_suffix, _mw in [("all", _ALL_MW)]:#, ("junction_only", _SJ_MW)]:
+            _key = "debug_splice_junctions__annotated__{}__{}__{}" .format(_cfg, _loss_suffix, _mod_suffix)
+            _DEBUG_SJ_RUNS[_key] = {
+                "modality_weights":         _mw,
+                "init_strategy":            "normal",
+                "use_gtf":                  False,
+                "num_segments":             None,
+                "rope":                     _rope,
+                "new_junction_loss":        _new_loss,
+                "junction_position_source": "annotated",
+            }
+
+for _cfg, _rope, _gtf in _SJ_PREDICTED_CONFIGS:
+    for _loss_suffix, _new_loss in [("origloss", False), ("newloss", True)]:
+        for _mod_suffix, _mw in [("all", _ALL_MW)]:#, ("junction_only", _SJ_MW)]:
+            _key = "debug_splice_junctions__predicted__{}__{}__{}" .format(_cfg, _loss_suffix, _mod_suffix)
+            _DEBUG_SJ_RUNS[_key] = {
+                "modality_weights":         _mw,
+                "init_strategy":            "pretrained",
+                "use_gtf":                  _gtf,
+                "num_segments":             None,
+                "rope":                     _rope,
+                "new_junction_loss":        _new_loss,
+                "junction_position_source": "predicted",
+            }
 
 ALL_RUNS = {}
 ALL_RUNS.update(_ORIGINAL_RUNS)
-#ALL_RUNS.update(_DEBUG_SS_RUNS)
-#ALL_RUNS.update(_DEBUG_SJ_RUNS)
+ALL_RUNS.update(_DEBUG_SS_RUNS)
+ALL_RUNS.update(_DEBUG_SJ_RUNS)
 
 _GROUP_RUNS = {
     "original":               list(_ORIGINAL_RUNS.keys()),
-    #"debug_splice_sites":     list(_DEBUG_SS_RUNS.keys()),
-    #"debug_splice_junctions": list(_DEBUG_SJ_RUNS.keys()),
+    "debug_splice_sites":     list(_DEBUG_SS_RUNS.keys()),
+    "debug_splice_junctions": list(_DEBUG_SJ_RUNS.keys()),
 }
 
+print(_GROUP_RUNS)
 
 # ---------------------------------------------------------------------------
 # Parameter helper functions
@@ -166,6 +189,17 @@ def _rope_arg(wildcards):
         return "--rope-init truncated_normal"
     return "--rope-init zeros"
 
+
+def _new_loss_arg(wildcards):
+    if ALL_RUNS[wildcards.run_name].get("new_junction_loss", False):
+        return "--junction-loss normalized"
+    return "--junction-loss original"
+
+
+def _junction_position_source_arg(wildcards):
+    src = ALL_RUNS[wildcards.run_name].get("junction_position_source", "annotated")
+    return "--junction-position-source {}".format(src)
+
 # ---------------------------------------------------------------------------
 # Rules
 # ---------------------------------------------------------------------------
@@ -173,10 +207,15 @@ def _rope_arg(wildcards):
 rule all:
     input:
         expand(
-            os.path.join(OUTPUT_DIR, "{density}", "{run_name}", "visualization", "summary_stats.parquet"),
+            os.path.join(OUTPUT_DIR, "{density}", "{run_name}", "epoch_log.csv"),
             density=DENSITIES,
             run_name=list(ALL_RUNS.keys()),
         ),
+        # expand(
+        #     os.path.join(OUTPUT_DIR, "{density}", "{run_name}", "visualization", "summary_stats.parquet"),
+        #     density=DENSITIES,
+        #     run_name=list(ALL_RUNS.keys()),
+        # ),
         os.path.join(OUTPUT_DIR, "summary", "epoch_logs.parquet"),
         # expand(
         #     os.path.join(OUTPUT_DIR, "summary", "{group}.pdf"),
@@ -214,6 +253,7 @@ rule overfit_single:
         ],
     output:
         checkpoint = os.path.join(OUTPUT_DIR, "{density}", "{run_name}", "best_model.pth"),
+        epoch_log  = os.path.join(OUTPUT_DIR, "{density}", "{run_name}", "epoch_log.csv"),
     params:
         num_gpus                    = 1,
         modality_bigwig             = config["finetuning"]["alphagenome"]["sf3b1mut"]["modality_bigwig"],
@@ -232,6 +272,8 @@ rule overfit_single:
         gtf_arg                     = _gtf_arg,
         num_segments_arg            = _num_segments_arg,
         rope_arg                    = _rope_arg,
+        new_loss_arg                = _new_loss_arg,
+        junction_position_source_arg = _junction_position_source_arg,
     threads: 6
     resources:
         gres      = "gpu:7g.80gb:1",
@@ -278,7 +320,9 @@ rule overfit_single:
             {params.pretrained_head_arg} \
             {params.gtf_arg} \
             {params.num_segments_arg} \
-            {params.rope_arg}
+            {params.rope_arg} \
+            {params.new_loss_arg} \
+            {params.junction_position_source_arg}
 
         rm -f "$FINETUNE_SCRIPT"
 
