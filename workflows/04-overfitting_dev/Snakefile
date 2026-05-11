@@ -26,31 +26,60 @@ BIGWIG_STRANDS = ["forward", "reverse"]
 
 # ---------------------------------------------------------------------------
 # Run configuration
-# Each entry: modality_weights, init_strategy, use_gtf, loss_partitions,
-#             rope, new_junction_loss
+# Each entry: modality_weights, pretrained_head, use_gtf, rope, new_junction_loss,
+#             junction_position_source
+#
+# All runs: pretrained splice_site + splice_junctions (index 139), truncated RoPE.
+# Two init groups for rna_seq / splice_usage:
+#   randinit  — NA (random)
+#   pretrinit — per-track pretrained indices (2 samples x 2 strands = 4 tracks each)
+#               rna_seq:  119(+) / 390(-) repeated per sample → 119|390|119|390
+#               splice_usage: 139(+) / 506(-) repeated per sample → 139|506|139|506
+# Junction position source crossed independently:
+#   annotated — positions from STAR SJ.out.tab
+#   predicted — positions from splice site head predictions
 # ---------------------------------------------------------------------------
 
 _ALL_MW = "rna_seq:1.0,splice_site:1.0,splice_usage:1.0,splice_junctions:1.0"
-_SJ_MW  = "rna_seq:0.0,splice_site:0.0,splice_usage:0.0,splice_junctions:1.0"
 
-# 2 (loss_variant) configs x 2 modality-weight sets
-_SJ_CONFIGS = [
-    ("truncrope_origloss", False),
-    ("truncrope_newloss",  True),
+_RANDINIT_HEAD  = "rna_seq:NA,splice_usage:NA,splice_junctions:139,splice_site:0"
+_PRETRINIT_HEAD = "rna_seq:119|390|119|390,splice_usage:139|506|139|506,splice_junctions:139,splice_site:0"
+
+# 2 init strategies x 2 loss variants x 2 junction position sources x 2 trunk modes
+_SJ_INITS = [
+    ("randinit",  _RANDINIT_HEAD),
+    ("pretrinit", _PRETRINIT_HEAD),
+]
+_SJ_LOSSES = [
+    ("origloss", False),
+    ("newloss",  True),
+]
+_JPS_OPTIONS = [
+    ("annotated", "annotated"),
+    ("predicted", "predicted"),
+]
+_MODES = [
+   ("frozen", "linear-probe"),
+   #("lora",   "lora"),
 ]
 
 _DEBUG_SJ_RUNS = {}
-for _cfg, _new_loss in _SJ_CONFIGS:
-    for _mod_suffix, _mw in [("junction_only", _SJ_MW), ("all", _ALL_MW)]:
-        _key = "debug_splice_junctions__{}__{}" .format(_cfg, _mod_suffix)
-        _DEBUG_SJ_RUNS[_key] = {
-            "modality_weights":  _mw,
-            "init_strategy":     "normal",
-            "use_gtf":           False,
-            "loss_partitions":   None,
-            "rope":              "truncated",
-            "new_junction_loss": _new_loss,
-        }
+for _init, _head in _SJ_INITS:
+    for _loss, _new_loss in _SJ_LOSSES:
+        for _jps_suffix, _jps in _JPS_OPTIONS:
+            for _mode_suffix, _mode in _MODES:
+                _key = "debug_splice_junctions__{}__{}__{}__{}" .format(
+                    _init, _loss, _jps_suffix, _mode_suffix
+                )
+                _DEBUG_SJ_RUNS[_key] = {
+                    "modality_weights":         _ALL_MW,
+                    "pretrained_head":          _head,
+                    "use_gtf":                  False,
+                    "rope":                     "truncated",
+                    "new_junction_loss":        _new_loss,
+                    "mode":                     _mode,
+                    "junction_position_source": _jps,
+                }
 
 ALL_RUNS = {}
 ALL_RUNS.update(_DEBUG_SJ_RUNS)
@@ -68,25 +97,13 @@ def _modality_weights(wildcards):
     return ALL_RUNS[wildcards.run_name]["modality_weights"]
 
 
-def _pretrained_head_arg(wildcards):
-    if ALL_RUNS[wildcards.run_name]["init_strategy"] == "pretrained":
-        return (
-            "--pretrained-head-samples rna_seq:119,splice_usage:139,splice_junctions:139,splice_site:0"
-            " --organism human"
-        )
-    return "--pretrained-head-samples rna_seq:NA,splice_usage:NA,splice_junctions:NA,splice_site:NA --organism human"
+def _pretrained_head_samples(wildcards):
+    return ALL_RUNS[wildcards.run_name]["pretrained_head"]
 
 
 def _gtf_arg(wildcards, input):
     if ALL_RUNS[wildcards.run_name]["use_gtf"]:
         return "--gtf {}".format(input.gtf_parquet)
-    return ""
-
-
-def _loss_partitions_arg(wildcards):
-    lp = ALL_RUNS[wildcards.run_name]["loss_partitions"]
-    if lp is not None:
-        return "--loss-partitions {}".format(lp)
     return ""
 
 
@@ -102,6 +119,27 @@ def _new_loss_arg(wildcards):
     return "--junction-loss original"
 
 
+def _warmup_steps(wildcards):
+    return 2 if "randinit" in wildcards.run_name else 0
+
+
+def _junction_position_source_arg(wildcards):
+    src = ALL_RUNS[wildcards.run_name]["junction_position_source"]
+    return "--junction-position-source {}".format(src)
+
+
+def _mode_args(wildcards):
+    mode = ALL_RUNS[wildcards.run_name]["mode"]
+    if mode == "lora":
+        return (
+            "--mode lora"
+            " --lora-rank 8 --lora-alpha 8"
+            " --lora-targets encoder.linear,encoder.proj,tower.linear,tower.proj,tower.fc,decoder.linear,decoder.proj,embedder_1bp.linear,embedder_1bp.proj"
+            " --locon-rank 4 --locon-alpha 1"
+        )
+    return "--mode linear-probe"
+
+
 # ---------------------------------------------------------------------------
 # Rules
 # ---------------------------------------------------------------------------
@@ -109,13 +147,18 @@ def _new_loss_arg(wildcards):
 rule all:
     input:
         expand(
-            os.path.join(OUTPUT_DIR, "{run_name}", "visualization", "summary_stats.parquet"),
+            os.path.join(OUTPUT_DIR, "{run_name}", "epoch_log.csv"),
             run_name=list(ALL_RUNS.keys()),
         ),
-        expand(
-            os.path.join(OUTPUT_DIR, "summary", "{group}.pdf"),
-            group=list(_GROUP_RUNS.keys()),
-        ),
+        os.path.join(OUTPUT_DIR, "summary", "epoch_logs.parquet"),
+        # expand(
+        #     os.path.join(OUTPUT_DIR, "{run_name}", "visualization", "summary_stats.parquet"),
+        #     run_name=list(ALL_RUNS.keys()),
+        # ),
+        # expand(
+        #     os.path.join(OUTPUT_DIR, "summary", "{group}.pdf"),
+        #     group=list(_GROUP_RUNS.keys()),
+        # ),
 
 
 rule overfit_dev:
@@ -144,6 +187,7 @@ rule overfit_dev:
         ],
     output:
         checkpoint = os.path.join(OUTPUT_DIR, "{run_name}", "best_model.pth"),
+        epoch_log  = os.path.join(OUTPUT_DIR, "{run_name}", "epoch_log.csv"), # this will be removed if rerun!
     params:
         num_gpus                    = 1,
         modality_bigwig             = config["finetuning"]["alphagenome"]["sf3b1mut"]["modality_bigwig"],
@@ -151,18 +195,21 @@ rule overfit_dev:
         sequence_length             = config["finetuning"]["alphagenome"]["sf3b1mut"]["sequence_length"],
         overlap_highres             = 1024,
         lr                          = 1e-3,
-        epochs                      = 50,
+        epochs                      = 10,
         batch_size                  = 1,
-        gradient_accumulation_steps = 1,
+        gradient_accumulation_steps = 8,
+        weight_decay                = 0.1,
+        warmup_steps                = _warmup_steps,
         track_means_samples         = config["finetuning"]["alphagenome"]["sf3b1mut"]["track_means_samples"],
         save_every_steps            = 50,
         output_dir                  = OUTPUT_DIR,
         modality_weights            = _modality_weights,
-        pretrained_head_arg         = _pretrained_head_arg,
+        pretrained_head_samples     = _pretrained_head_samples,
         gtf_arg                     = _gtf_arg,
-        loss_partitions_arg         = _loss_partitions_arg,
         rope_arg                    = _rope_arg,
         new_loss_arg                = _new_loss_arg,
+        mode_args                        = _mode_args,
+        junction_position_source_arg     = _junction_position_source_arg,
     threads: 6
     resources:
         gres      = "gpu:7g.80gb:1",
@@ -183,7 +230,7 @@ rule overfit_dev:
 
         torchrun --nproc_per_node={params.num_gpus} "$FINETUNE_SCRIPT" \
             --num-workers {threads} \
-            --mode linear-probe \
+            {params.mode_args} \
             --modality-weights "{params.modality_weights}" \
             --genome {input.genome} \
             --modality {params.modality_bigwig} --bigwig {input.bigwigs} \
@@ -194,8 +241,9 @@ rule overfit_dev:
             --gradient-checkpointing \
             --resume auto \
             --lr {params.lr} \
-            --warmup-steps 0 \
-            --lr-schedule constant \
+            --warmup-steps {params.warmup_steps} \
+            --lr-schedule cosine \
+            --weight-decay {params.weight_decay} \
             --batch-size {params.batch_size} \
             --gradient-accumulation-steps {params.gradient_accumulation_steps} \
             --epochs {params.epochs} \
@@ -204,100 +252,125 @@ rule overfit_dev:
             --track-means-samples {params.track_means_samples} \
             --save-every-steps {params.save_every_steps} \
             --run-name {wildcards.run_name} \
-            --max-grad-norm inf \
-            --seed 1234 \
-            {params.pretrained_head_arg} \
+            --max-grad-norm 1.0 \
+            --seed 0 \
+            --pretrained-head-samples "{params.pretrained_head_samples}" --organism human \
             {params.gtf_arg} \
-            {params.loss_partitions_arg} \
             {params.rope_arg} \
-            {params.new_loss_arg}
+            {params.new_loss_arg} \
+            {params.junction_position_source_arg} \
+            --eval-train-pearson
 
         rm -f "$FINETUNE_SCRIPT"
 
-        find "{params.output_dir}/{wildcards.run_name}" -name "*.pth" ! -name "best_model.pth" -delete
+        find "{params.output_dir}/{wildcards.run_name}" -name "*.pth" ! -name "best_model.pth" -printf "%T@ %p\n" \
+            | sort -n | head -n -1 | awk '{{print $2}}' | xargs -r rm -f
 
         echo "Done!"
         """
 
-
-rule visualize_dev:
-    """Visualize predictions vs real tracks for genes overlapping the dev val intervals."""
-    wildcard_constraints:
-        run_name = "|".join(ALL_RUNS.keys()),
+rule combine_epoch_logs:
     input:
-        checkpoint     = os.path.join(OUTPUT_DIR, "{run_name}", "best_model.pth"),
-        bed            = os.path.join(DEV_BED_DIR, "valid.bed"),
-        genome         = config["gencode"]["paths"]["fasta"],
-        gtf            = config["gencode"]["paths"]["gtf"],
-        gtf_parquet    = config["gencode"]["paths"]["gtf_parquet"],
-        bigwigs        = [
-            os.path.join(DATA_DIR, "STAR", sample,
-                         "paper_pass.Aligned.sortedByCoord.out.filtered." + strand + ".bw")
-            for sample in SAMPLES
-            for strand in BIGWIG_STRANDS
-        ],
-        star_junctions = [
-            os.path.join(DATA_DIR, "STAR", sample, "paper_pass.SJ.out.tab")
-            for sample in SAMPLES
-        ],
-        ssu_parquets = [
-            os.path.join(DATA_DIR, "STAR", sample, "paper_pass.ssu.parquet")
-            for sample in SAMPLES
-        ],
+        logs = lambda wildcards: expand(
+            os.path.join(OUTPUT_DIR, "{run_name}", "epoch_log.csv"),
+            run_name=list(ALL_RUNS.keys()),
+        )
     output:
-        summary = os.path.join(OUTPUT_DIR, "{run_name}", "visualization", "summary_stats.parquet"),
-    params:
-        script          = "src/scripts/visualize_overfit.py",
-        sequence_length = config["finetuning"]["alphagenome"]["sf3b1mut"]["sequence_length"],
-        viz_dir         = lambda wildcards: os.path.join(
-            OUTPUT_DIR, wildcards.run_name, "visualization"
-        ),
-        gtf_arg         = lambda wildcards, input: (
-            "--gtf-splice-sites {}".format(input.gtf_parquet)
-            if ALL_RUNS[wildcards.run_name]["use_gtf"]
-            else ""
-        ),
-    conda:
-        "alphagenome_pytorch"
-    shell:
-        """
-        mkdir -p {params.viz_dir}
-        python {params.script} \
-            --checkpoint {input.checkpoint} \
-            --bed {input.bed} \
-            --genome {input.genome} \
-            --gtf {input.gtf} \
-            --bigwig {input.bigwigs} \
-            --star-junctions {input.star_junctions} \
-            --sequence-length {params.sequence_length} \
-            --output-dir {params.viz_dir} \
-            {params.gtf_arg}
-        """
+        combined = os.path.join(OUTPUT_DIR, "summary", "epoch_logs.parquet")
+    threads: 1
+    run:
+        import pandas as pd
+
+        combined = pd.concat([
+            (
+                pd.read_csv(f)
+                .assign(run_name = os.path.basename(os.path.dirname(f)))
+            )
+            for f in input.logs
+        ])
+
+        combined.to_parquet(output.combined, index=False, compression="zstd")
+
+        print("Done!")
+
+# rule visualize_dev:
+#     """Visualize predictions vs real tracks for genes overlapping the dev val intervals."""
+#     wildcard_constraints:
+#         run_name = "|".join(ALL_RUNS.keys()),
+#     input:
+#         checkpoint     = os.path.join(OUTPUT_DIR, "{run_name}", "best_model.pth"),
+#         bed            = os.path.join(DEV_BED_DIR, "valid.bed"),
+#         genome         = config["gencode"]["paths"]["fasta"],
+#         gtf            = config["gencode"]["paths"]["gtf"],
+#         gtf_parquet    = config["gencode"]["paths"]["gtf_parquet"],
+#         bigwigs        = [
+#             os.path.join(DATA_DIR, "STAR", sample,
+#                          "paper_pass.Aligned.sortedByCoord.out.filtered." + strand + ".bw")
+#             for sample in SAMPLES
+#             for strand in BIGWIG_STRANDS
+#         ],
+#         star_junctions = [
+#             os.path.join(DATA_DIR, "STAR", sample, "paper_pass.SJ.out.tab")
+#             for sample in SAMPLES
+#         ],
+#         ssu_parquets = [
+#             os.path.join(DATA_DIR, "STAR", sample, "paper_pass.ssu.parquet")
+#             for sample in SAMPLES
+#         ],
+#     output:
+#         summary = os.path.join(OUTPUT_DIR, "{run_name}", "visualization", "summary_stats.parquet"),
+#     params:
+#         script          = "src/scripts/visualize_overfit.py",
+#         sequence_length = config["finetuning"]["alphagenome"]["sf3b1mut"]["sequence_length"],
+#         viz_dir         = lambda wildcards: os.path.join(
+#             OUTPUT_DIR, wildcards.run_name, "visualization"
+#         ),
+#         gtf_arg         = lambda wildcards, input: (
+#             "--gtf-splice-sites {}".format(input.gtf_parquet)
+#             if ALL_RUNS[wildcards.run_name]["use_gtf"]
+#             else ""
+#         ),
+#     conda:
+#         "alphagenome_pytorch"
+#     shell:
+#         """
+#         mkdir -p {params.viz_dir}
+#         python {params.script} \
+#             --checkpoint {input.checkpoint} \
+#             --bed {input.bed} \
+#             --genome {input.genome} \
+#             --gtf {input.gtf} \
+#             --bigwig {input.bigwigs} \
+#             --star-junctions {input.star_junctions} \
+#             --sequence-length {params.sequence_length} \
+#             --output-dir {params.viz_dir} \
+#             {params.gtf_arg}
+#         """
 
 
-rule plot_group_summary:
-    """Plot training dynamics and junction correlations for all runs in the experiment group."""
-    wildcard_constraints:
-        group = "|".join(_GROUP_RUNS.keys()),
-    input:
-        summaries = lambda wildcards: expand(
-            os.path.join(OUTPUT_DIR, "{run_name}", "visualization", "summary_stats.parquet"),
-            run_name=_GROUP_RUNS[wildcards.group],
-        ),
-    output:
-        pdf = os.path.join(OUTPUT_DIR, "summary", "{group}.pdf"),
-    params:
-        script   = "src/scripts/plot_overfit_summary.py",
-        run_dirs = lambda wildcards: [
-            os.path.join(OUTPUT_DIR, run_name)
-            for run_name in _GROUP_RUNS[wildcards.group]
-        ],
-    conda:
-        "alphagenome_pytorch"
-    shell:
-        """
-        mkdir -p "$(dirname {output.pdf})"
-        python {params.script} \
-            --run-dirs {params.run_dirs} \
-            --output {output.pdf}
-        """
+# rule plot_group_summary:
+#     """Plot training dynamics and junction correlations for all runs in the experiment group."""
+#     wildcard_constraints:
+#         group = "|".join(_GROUP_RUNS.keys()),
+#     input:
+#         summaries = lambda wildcards: expand(
+#             os.path.join(OUTPUT_DIR, "{run_name}", "visualization", "summary_stats.parquet"),
+#             run_name=_GROUP_RUNS[wildcards.group],
+#         ),
+#     output:
+#         pdf = os.path.join(OUTPUT_DIR, "summary", "{group}.pdf"),
+#     params:
+#         script   = "src/scripts/plot_overfit_summary.py",
+#         run_dirs = lambda wildcards: [
+#             os.path.join(OUTPUT_DIR, run_name)
+#             for run_name in _GROUP_RUNS[wildcards.group]
+#         ],
+#     conda:
+#         "alphagenome_pytorch"
+#     shell:
+#         """
+#         mkdir -p "$(dirname {output.pdf})"
+#         python {params.script} \
+#             --run-dirs {params.run_dirs} \
+#             --output {output.pdf}
+#         """
