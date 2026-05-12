@@ -37,41 +37,48 @@ def main():
         args.bed, sep="\t", header=None, names=["chrom", "start", "end"],
     )
 
-    sj_frames = []
-    for sj_path in args.star_junctions:
+    gr_intervals = pr.PyRanges(
+        intervals.rename(columns={"chrom": "Chromosome", "start": "Start", "end": "End"})
+    )
+
+    per_sample_rows = []
+    for i, sj_path in enumerate(args.star_junctions):
         df = pd.read_csv(
             sj_path, sep="\t", header=None,
             names=["chrom", "intron_start", "intron_end", "strand", "motif",
                    "annotated", "n_unique", "n_multi", "max_overhang"],
         )
-        sj_frames.append(df)
-    junctions = pd.concat(sj_frames, ignore_index=True)
+        df = df[df["n_unique"] > 0]
 
-    # Convert STAR 1-based intron coords to 0-based half-open BED coords
-    junctions["j_start"] = junctions["intron_start"] - 1
-    junctions["j_end"]   = junctions["intron_end"]
+        gr_junctions = pr.PyRanges(pd.DataFrame({
+            "Chromosome": df["chrom"].values,
+            "Start":      (df["intron_start"] - 1).values,
+            "End":        df["intron_end"].values,
+            "n_unique":   df["n_unique"].values,
+        }))
 
-    gr_intervals = pr.PyRanges(
-        intervals.rename(columns={"chrom": "Chromosome", "start": "Start", "end": "End"})
-    )
-    gr_junctions = pr.PyRanges(pd.DataFrame({
-        "Chromosome": junctions["chrom"].values,
-        "Start":      junctions["j_start"].values,
-        "End":        junctions["j_end"].values,
-        "n_unique":   junctions["n_unique"].values,
-    }))
+        # Overlap join then filter to strict containment (junction fully inside interval)
+        joined_df = gr_intervals.join(gr_junctions, how=None).df
+        contained = joined_df[
+            (joined_df["Start_b"] >= joined_df["Start"]) &
+            (joined_df["End_b"]   <= joined_df["End"])
+        ]
 
-    # Overlap join then filter to strict containment (junction fully inside interval)
-    joined_df = gr_intervals.join(gr_junctions, how=None).df
-    contained = joined_df[
-        (joined_df["Start_b"] >= joined_df["Start"]) &
-        (joined_df["End_b"]   <= joined_df["End"])
-    ]
+        sample_agg = (
+            contained
+            .groupby(["Chromosome", "Start", "End"])
+            .agg(total_reads=("n_unique", "sum"), n_junctions=("n_unique", "count"))
+            .reset_index()
+        )
+        sample_agg["sample"] = i
+        per_sample_rows.append(sample_agg)
+
+    per_sample = pd.concat(per_sample_rows, ignore_index=True)
 
     agg = (
-        contained
+        per_sample
         .groupby(["Chromosome", "Start", "End"])
-        .agg(total_reads=("n_unique", "sum"), n_junctions=("n_unique", "count"))
+        .agg(total_reads=("total_reads", "mean"), n_junctions=("n_junctions", "mean"))
         .reset_index()
         .rename(columns={"Chromosome": "chrom", "Start": "start", "End": "end"})
     )
