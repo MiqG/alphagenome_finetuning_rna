@@ -104,13 +104,13 @@ for _cfg, _init, _ns, _gtf in _SS_CONFIGS:
 # annotated mode: randinit + nogtf x 2 rope x 2 loss  (4 runs)
 # predicted mode: pretrinit x gtf/nogtf x 2 rope x 2 loss  (8 runs)
 _SJ_ANNOTATED_ROPES = [
-    ("origrope",  "original"),
+    #("origrope",  "original"),
     ("truncrope", "truncated"),
 ]
 _SJ_PREDICTED_CONFIGS = [
-    ("origrope_gtf",   "original",  True),
-    ("origrope_nogtf", "original",  False),
-    ("truncrope_gtf",  "truncated", True),
+    #("origrope_gtf",   "original",  True),
+    #("origrope_nogtf", "original",  False),
+    #("truncrope_gtf",  "truncated", True),
     ("truncrope_nogtf","truncated", False),
 ]
 
@@ -144,8 +144,8 @@ for _cfg, _rope, _gtf in _SJ_PREDICTED_CONFIGS:
             }
 
 ALL_RUNS = {}
-ALL_RUNS.update(_ORIGINAL_RUNS)
-ALL_RUNS.update(_DEBUG_SS_RUNS)
+#ALL_RUNS.update(_ORIGINAL_RUNS)
+#ALL_RUNS.update(_DEBUG_SS_RUNS)
 ALL_RUNS.update(_DEBUG_SJ_RUNS)
 
 _GROUP_RUNS = {
@@ -167,7 +167,7 @@ def _modality_weights(wildcards):
 def _pretrained_head_arg(wildcards):
     if ALL_RUNS[wildcards.run_name]["init_strategy"] == "pretrained":
         return (
-            "--pretrained-head-samples rna_seq:119,splice_usage:139,splice_junctions:139,splice_site:0"
+            "--pretrained-head-samples rna_seq:NA,splice_usage:NA,splice_junctions:NA,splice_site:0"
             " --organism human"
         )
     return "--pretrained-head-samples rna_seq:NA,splice_usage:NA,splice_junctions:NA,splice_site:NA --organism human"
@@ -207,16 +207,16 @@ def _junction_position_source_arg(wildcards):
 rule all:
     input:
         expand(
-            os.path.join(OUTPUT_DIR, "{density}", "{run_name}", "epoch_log.csv"),
+            os.path.join(OUTPUT_DIR, "{density}", "{run_name}", "best_model.pth"),
             density=DENSITIES,
             run_name=list(ALL_RUNS.keys()),
         ),
+        os.path.join(OUTPUT_DIR, "summary", "epoch_logs.parquet"),
         # expand(
         #     os.path.join(OUTPUT_DIR, "{density}", "{run_name}", "visualization", "summary_stats.parquet"),
         #     density=DENSITIES,
         #     run_name=list(ALL_RUNS.keys()),
         # ),
-        os.path.join(OUTPUT_DIR, "summary", "epoch_logs.parquet"),
         # expand(
         #     os.path.join(OUTPUT_DIR, "summary", "{group}.pdf"),
         #     group=list(_GROUP_RUNS.keys()),
@@ -252,18 +252,18 @@ rule overfit_single:
             for sample in SAMPLES
         ],
     output:
-        checkpoint = os.path.join(OUTPUT_DIR, "{density}", "{run_name}", "best_model.pth"),
-        epoch_log  = os.path.join(OUTPUT_DIR, "{density}", "{run_name}", "epoch_log.csv"),
+        checkpoint = os.path.join(OUTPUT_DIR, "{density}", "{run_name}", "best_model.pth")
     params:
         num_gpus                    = 1,
         modality_bigwig             = config["finetuning"]["alphagenome"]["sf3b1mut"]["modality_bigwig"],
         modality_splicing           = config["finetuning"]["alphagenome"]["sf3b1mut"]["modality_splicing"],
         sequence_length             = config["finetuning"]["alphagenome"]["sf3b1mut"]["sequence_length"],
-        overlap_highres             = 1024,
-        lr                          = 1e-3,
-        epochs                      = 50,
+        lr                          = 1e-2,
+        epochs                      = 500,
         batch_size                  = 1,
         gradient_accumulation_steps = 1,
+        weight_decay                = 0.1,
+        warmup_steps                = 20,
         track_means_samples         = config["finetuning"]["alphagenome"]["sf3b1mut"]["track_means_samples"],
         save_every                  = 9999,
         output_dir                  = os.path.join(OUTPUT_DIR, "{density}"),
@@ -274,13 +274,12 @@ rule overfit_single:
         rope_arg                    = _rope_arg,
         new_loss_arg                = _new_loss_arg,
         junction_position_source_arg = _junction_position_source_arg,
-    threads: 6
+    threads: 3
     resources:
-        gres      = "gpu:7g.80gb:1",
+        gres      = "gpu:3g.40gb:1",
         partition = "gpu",
-        runtime   = 12 * 60,
-        memory    = 80,
-        nodelist  = "genoa64-09",
+        runtime   = 4 * 60,
+        memory    = 42,
     conda:
         "alphagenome_pytorch"
     retries: 0
@@ -292,7 +291,9 @@ rule overfit_single:
         FINETUNE_SCRIPT=$(mktemp /tmp/finetune_XXXXXX.py)
         cp {FINETUNE_SCRIPT} "$FINETUNE_SCRIPT"
 
-        torchrun --nproc_per_node={params.num_gpus} "$FINETUNE_SCRIPT" \
+        MASTER_PORT=$(python -c "import socket; s=socket.socket(); s.bind(('',0)); print(s.getsockname()[1]); s.close()")
+
+        torchrun --nproc_per_node={params.num_gpus} --master_port "$MASTER_PORT" "$FINETUNE_SCRIPT" \
             --num-workers {threads} \
             --mode linear-probe \
             --modality-weights "{params.modality_weights}" \
@@ -305,9 +306,9 @@ rule overfit_single:
             --gradient-checkpointing \
             --resume auto \
             --lr {params.lr} \
-            --warmup-steps 0 \
-            --lr-schedule constant \
-            --batch-size {params.batch_size} \
+            --warmup-steps {params.warmup_steps} \
+            --lr-schedule cosine \
+            --weight-decay {params.weight_decay} \
             --gradient-accumulation-steps {params.gradient_accumulation_steps} \
             --epochs {params.epochs} \
             --output-dir {params.output_dir} \
@@ -331,48 +332,81 @@ rule overfit_single:
         echo "Done!"
         """
 
-
-rule visualize_single:
-    """Visualize predictions vs real tracks for genes overlapping the overfitting interval."""
-    wildcard_constraints:
-        density  = "|".join(DENSITIES),
-        run_name = "|".join(ALL_RUNS.keys()),
-    input:
-        checkpoint     = os.path.join(OUTPUT_DIR, "{density}", "{run_name}", "best_model.pth"),
-        bed            = os.path.join(SINGLE_BED_DIR, "{density}.bed"),
-        genome         = config["gencode"]["paths"]["fasta"],
-        gtf            = config["gencode"]["paths"]["gtf"],
-        gtf_parquet    = config["gencode"]["paths"]["gtf_parquet"],
-        bigwigs        = [
-            os.path.join(DATA_DIR, "STAR", sample,
-                         "paper_pass.Aligned.sortedByCoord.out.filtered." + strand + ".bw")
-            for sample in SAMPLES
-            for strand in BIGWIG_STRANDS
-        ],
-        star_junctions = [
-            os.path.join(DATA_DIR, "STAR", sample, "paper_pass.SJ.out.tab")
-            for sample in SAMPLES
-        ],
-        ssu_parquets = [
-            os.path.join(DATA_DIR, "STAR", sample, "paper_pass.ssu.parquet")
-            for sample in SAMPLES
-        ],
-    output:
-        summary = os.path.join(OUTPUT_DIR, "{density}", "{run_name}", "visualization", "summary_stats.parquet"),
+rule combine_epoch_logs:
     params:
-        script    = "src/scripts/visualize_overfit.py",
-        sequence_length = config["finetuning"]["alphagenome"]["sf3b1mut"]["sequence_length"],
-        viz_dir   = lambda wildcards: os.path.join(
-            OUTPUT_DIR, wildcards.density, wildcards.run_name, "visualization"
-        ),
-        gtf_arg   = lambda wildcards, input: (
-            "--gtf-splice-sites {}".format(input.gtf_parquet)
-            if ALL_RUNS[wildcards.run_name]["use_gtf"]
-            else ""
-        ),
-    conda:
-        "alphagenome_pytorch"
-    shell:
+        logs = lambda wildcards: expand(
+            os.path.join(OUTPUT_DIR, "{density}", "{run_name}", "epoch_log.csv"),
+            run_name=list(ALL_RUNS.keys()),
+            density=DENSITIES
+        )
+    input:
+        models = lambda wildcards: expand(
+            os.path.join(OUTPUT_DIR, "{density}", "{run_name}", "best_model.pth"),
+            run_name=list(ALL_RUNS.keys()),
+            density=DENSITIES
+        )
+    output:
+        combined = os.path.join(OUTPUT_DIR, "summary", "epoch_logs.parquet")
+    threads: 1
+    run:
+        import pandas as pd
+
+        combined = pd.concat([
+            (
+                pd.read_csv(f)
+                .assign(
+                    run_name = os.path.basename(os.path.dirname(f)),
+                    density = os.path.basename(os.path.dirname(os.path.dirname(f)))
+                )
+            )
+            for f in params.logs
+        ])
+
+        combined.to_parquet(output.combined, index=False, compression="zstd")
+
+        print("Done!")
+
+# rule visualize_single:
+#     """Visualize predictions vs real tracks for genes overlapping the overfitting interval."""
+#     wildcard_constraints:
+#         density  = "|".join(DENSITIES),
+#         run_name = "|".join(ALL_RUNS.keys()),
+#     input:
+#         checkpoint     = os.path.join(OUTPUT_DIR, "{density}", "{run_name}", "best_model.pth"),
+#         bed            = os.path.join(SINGLE_BED_DIR, "{density}.bed"),
+#         genome         = config["gencode"]["paths"]["fasta"],
+#         gtf            = config["gencode"]["paths"]["gtf"],
+#         gtf_parquet    = config["gencode"]["paths"]["gtf_parquet"],
+#         bigwigs        = [
+#             os.path.join(DATA_DIR, "STAR", sample,
+#                          "paper_pass.Aligned.sortedByCoord.out.filtered." + strand + ".bw")
+#             for sample in SAMPLES
+#             for strand in BIGWIG_STRANDS
+#         ],
+#         star_junctions = [
+#             os.path.join(DATA_DIR, "STAR", sample, "paper_pass.SJ.out.tab")
+#             for sample in SAMPLES
+#         ],
+#         ssu_parquets = [
+#             os.path.join(DATA_DIR, "STAR", sample, "paper_pass.ssu.parquet")
+#             for sample in SAMPLES
+#         ],
+#     output:
+#         summary = os.path.join(OUTPUT_DIR, "{density}", "{run_name}", "visualization", "summary_stats.parquet"),
+#     params:
+#         script    = "src/scripts/visualize_overfit.py",
+#         sequence_length = config["finetuning"]["alphagenome"]["sf3b1mut"]["sequence_length"],
+#         viz_dir   = lambda wildcards: os.path.join(
+#             OUTPUT_DIR, wildcards.density, wildcards.run_name, "visualization"
+#         ),
+#         gtf_arg   = lambda wildcards, input: (
+#             "--gtf-splice-sites {}".format(input.gtf_parquet)
+#             if ALL_RUNS[wildcards.run_name]["use_gtf"]
+#             else ""
+#         ),
+#     conda:
+#         "alphagenome_pytorch"
+#     shell:
         """
         mkdir -p {params.viz_dir}
         python {params.script} \
@@ -387,34 +421,6 @@ rule visualize_single:
             --output-dir {params.viz_dir} \
             {params.gtf_arg}
         """
-
-rule combine_epoch_logs:
-    input:
-        logs = lambda wildcards: expand(
-            os.path.join(OUTPUT_DIR, "{density}", "{run_name}", "epoch_log.csv"),
-            density=DENSITIES,
-            run_name=list(ALL_RUNS.keys()),
-        )
-    output:
-        combined = os.path.join(OUTPUT_DIR, "summary", "epoch_logs.parquet")
-    threads: 1
-    run:
-        import pandas as pd
-
-        combined = pd.concat([
-            (
-                pd.read_csv(f)
-                .assign(
-                    density = os.path.basename(os.path.dirname(os.path.dirname(f))),
-                    run_name = os.path.basename(os.path.dirname(f))
-                )
-            )
-            for f in input.logs
-        ])
-
-        combined.to_parquet(output.combined, index=False, compression="zstd")
-
-        print("Done!")
 
 # rule plot_group_summary:
 #     """Plot training dynamics and prediction correlations for all runs in an experiment group."""

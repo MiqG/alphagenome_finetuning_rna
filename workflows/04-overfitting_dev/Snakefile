@@ -42,7 +42,7 @@ BIGWIG_STRANDS = ["forward", "reverse"]
 
 _ALL_MW = "rna_seq:1.0,splice_site:1.0,splice_usage:1.0,splice_junctions:1.0"
 
-_RANDINIT_HEAD  = "rna_seq:NA,splice_usage:NA,splice_junctions:139,splice_site:0"
+_RANDINIT_HEAD  = "rna_seq:NA,splice_usage:NA,splice_junctions:NA,splice_site:0"
 _PRETRINIT_HEAD = "rna_seq:119|390|119|390,splice_usage:139|506|139|506,splice_junctions:139,splice_site:0"
 
 # 2 init strategies x 2 loss variants x 2 junction position sources x 2 trunk modes
@@ -60,7 +60,7 @@ _JPS_OPTIONS = [
 ]
 _MODES = [
    ("frozen", "linear-probe"),
-   #("lora",   "lora"),
+   ("lora",   "lora"),
 ]
 
 _DEBUG_SJ_RUNS = {}
@@ -140,6 +140,12 @@ def _mode_args(wildcards):
     return "--mode linear-probe"
 
 
+def _gres(wildcards):
+    if ALL_RUNS[wildcards.run_name]["mode"] == "lora":
+        return "gpu:7g.80gb:1"
+    return "gpu:3g.40gb:1"
+
+
 # ---------------------------------------------------------------------------
 # Rules
 # ---------------------------------------------------------------------------
@@ -147,7 +153,7 @@ def _mode_args(wildcards):
 rule all:
     input:
         expand(
-            os.path.join(OUTPUT_DIR, "{run_name}", "epoch_log.csv"),
+            os.path.join(OUTPUT_DIR, "{run_name}", "best_model.pth"),
             run_name=list(ALL_RUNS.keys()),
         ),
         os.path.join(OUTPUT_DIR, "summary", "epoch_logs.parquet"),
@@ -187,7 +193,6 @@ rule overfit_dev:
         ],
     output:
         checkpoint = os.path.join(OUTPUT_DIR, "{run_name}", "best_model.pth"),
-        epoch_log  = os.path.join(OUTPUT_DIR, "{run_name}", "epoch_log.csv"), # this will be removed if rerun!
     params:
         num_gpus                    = 1,
         modality_bigwig             = config["finetuning"]["alphagenome"]["sf3b1mut"]["modality_bigwig"],
@@ -210,13 +215,12 @@ rule overfit_dev:
         new_loss_arg                = _new_loss_arg,
         mode_args                        = _mode_args,
         junction_position_source_arg     = _junction_position_source_arg,
-    threads: 6
+    threads: 3
     resources:
-        gres      = "gpu:7g.80gb:1",
+        gres      = _gres,
         partition = "gpu",
-        runtime   = 12 * 60,
-        memory    = 80,
-        nodelist  = "genoa64-09",
+        runtime   = 4 * 60,
+        memory    = 42,
     conda:
         "alphagenome_pytorch"
     retries: 0
@@ -228,7 +232,9 @@ rule overfit_dev:
         FINETUNE_SCRIPT=$(mktemp /tmp/finetune_XXXXXX.py)
         cp {FINETUNE_SCRIPT} "$FINETUNE_SCRIPT"
 
-        torchrun --nproc_per_node={params.num_gpus} "$FINETUNE_SCRIPT" \
+        MASTER_PORT=$(python -c "import socket; s=socket.socket(); s.bind(('',0)); print(s.getsockname()[1]); s.close()")
+
+        torchrun --nproc_per_node={params.num_gpus} --master_port "$MASTER_PORT" "$FINETUNE_SCRIPT" \
             --num-workers {threads} \
             {params.mode_args} \
             --modality-weights "{params.modality_weights}" \
@@ -260,7 +266,7 @@ rule overfit_dev:
             {params.new_loss_arg} \
             {params.junction_position_source_arg} \
             --eval-train-pearson
-
+            
         rm -f "$FINETUNE_SCRIPT"
 
         find "{params.output_dir}/{wildcards.run_name}" -name "*.pth" ! -name "best_model.pth" -printf "%T@ %p\n" \
@@ -270,9 +276,14 @@ rule overfit_dev:
         """
 
 rule combine_epoch_logs:
-    input:
+    params:
         logs = lambda wildcards: expand(
             os.path.join(OUTPUT_DIR, "{run_name}", "epoch_log.csv"),
+            run_name=list(ALL_RUNS.keys()),
+        )
+    input:
+        models = lambda wildcards: expand(
+            os.path.join(OUTPUT_DIR, "{run_name}", "best_model.pth"),
             run_name=list(ALL_RUNS.keys()),
         )
     output:
@@ -286,7 +297,7 @@ rule combine_epoch_logs:
                 pd.read_csv(f)
                 .assign(run_name = os.path.basename(os.path.dirname(f)))
             )
-            for f in input.logs
+            for f in params.logs
         ])
 
         combined.to_parquet(output.combined, index=False, compression="zstd")
