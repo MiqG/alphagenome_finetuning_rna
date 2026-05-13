@@ -34,17 +34,24 @@ STAR_JUNCTIONS = [
     for s in SAMPLES
 ]
 
+WEIGHTS = config["alphagenome_pytorch"]["paths"]["weights"]
+GENOME  = config["gencode"]["paths"]["fasta"]
+SEQ_LEN = config["finetuning"]["alphagenome"]["sf3b1mut"]["sequence_length"]
+
 _N_BY_SPLIT = {
     "train": (PREP_CFG["dev"]["n_train_top"], PREP_CFG["dev"]["n_train_random"]),
     "valid": (PREP_CFG["dev"]["n_val_top"],   PREP_CFG["dev"]["n_val_random"]),
 }
 
 
+_FWD_OUTPUTS = ["rna_seq.npz", "splice_classification.npz", "splice_usage.npz", "splice_junctions.npz", "metadata.json"]
+
 rule all:
     input:
         os.path.join(SINGLE_DIR, "interval_ranking.tsv.gz"),
         expand(os.path.join(SINGLE_DIR, "{density}.bed"), density=DENSITIES),
         expand(os.path.join(DEV_DIR, "{split}.bed"), split=["train", "valid"]),
+        expand(os.path.join(SINGLE_DIR, "{density}", "{f}"), density=DENSITIES, f=_FWD_OUTPUTS),
 
 
 rule rank_intervals:
@@ -118,4 +125,35 @@ rule select_dev_intervals:
             --n-random {params.n_random} \
             --seed {params.seed} \
             --output {output.bed}
+        """
+
+
+rule pretrained_forward_pass_single:
+    """Run pretrained AlphaGenome forward pass on each single density interval."""
+    wildcard_constraints:
+        density = "high|medium|low",
+    input:
+        bed     = os.path.join(SINGLE_DIR, "{density}.bed"),
+        weights = WEIGHTS,
+        genome  = GENOME,
+    output:
+        rna_seq        = os.path.join(SINGLE_DIR, "{density}", "rna_seq.npz"),
+        classification = os.path.join(SINGLE_DIR, "{density}", "splice_classification.npz"),
+        usage          = os.path.join(SINGLE_DIR, "{density}", "splice_usage.npz"),
+        junctions      = os.path.join(SINGLE_DIR, "{density}", "splice_junctions.npz"),
+        metadata       = os.path.join(SINGLE_DIR, "{density}", "metadata.json"),
+    params:
+        script  = "src/scripts/run_pretrained_forward_pass.py",
+        out_dir = os.path.join(SINGLE_DIR, "{density}"),
+        seq_len = SEQ_LEN,
+    conda:
+        "alphagenome_pytorch"
+    shell:
+        """
+        python {params.script} \
+            --weights {input.weights} \
+            --bed {input.bed} \
+            --genome {input.genome} \
+            --sequence-length {params.seq_len} \
+            --output-dir {params.out_dir}
         """
