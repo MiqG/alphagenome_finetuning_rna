@@ -31,6 +31,7 @@ OUTPUT_DIR      = "results/finetuning/alphagenome_pytorch/overfitting/single"
 
 SAMPLES        = config["preprocessing"]["overfitting"]["samples"]
 DENSITIES      = ["medium"]
+DTYPES         = ["bfloat16", "float32"]
 BIGWIG_STRANDS = ["forward", "reverse"]
 
 # ---------------------------------------------------------------------------
@@ -126,6 +127,17 @@ for _rope_cfg, _rope in _SJ_ROPE_OPTIONS:
                     "junction_head_init":       _jinit,
                 }
 
+def _add_dtype_variants(runs):
+    result = {}
+    for key, cfg in runs.items():
+        for dtype in DTYPES:
+            result["{}__{}" .format(key, dtype)] = dict(cfg, dtype=dtype)
+    return result
+
+_ORIGINAL_RUNS = _add_dtype_variants(_ORIGINAL_RUNS)
+_DEBUG_SS_RUNS = _add_dtype_variants(_DEBUG_SS_RUNS)
+_DEBUG_SJ_RUNS = _add_dtype_variants(_DEBUG_SJ_RUNS)
+
 ALL_RUNS = {}
 ALL_RUNS.update(_ORIGINAL_RUNS)
 ALL_RUNS.update(_DEBUG_SS_RUNS)
@@ -185,6 +197,10 @@ def _new_loss_arg(wildcards):
 def _junction_position_source_arg(wildcards):
     src = ALL_RUNS[wildcards.run_name].get("junction_position_source", "annotated")
     return "--junction-position-source {}".format(src)
+
+
+def _dtype_arg(wildcards):
+    return "--dtype {}".format(ALL_RUNS[wildcards.run_name]["dtype"])
 
 # ---------------------------------------------------------------------------
 # Rules
@@ -260,6 +276,7 @@ rule overfit_single:
         rope_arg                    = _rope_arg,
         new_loss_arg                = _new_loss_arg,
         junction_position_source_arg = _junction_position_source_arg,
+        dtype_arg                    = _dtype_arg,
     threads: 20
     resources:
         runtime = int(2*60),  # hours in minutes
@@ -309,7 +326,8 @@ rule overfit_single:
             {params.num_segments_arg} \
             {params.rope_arg} \
             {params.new_loss_arg} \
-            {params.junction_position_source_arg}
+            {params.junction_position_source_arg} \
+            {params.dtype_arg}
 
         rm -f "$FINETUNE_SCRIPT"
 
