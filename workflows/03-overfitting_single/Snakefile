@@ -49,34 +49,34 @@ _ORIGINAL_RUNS = {
         "num_segments": None,
         "rope": "original",
     },
-    "original__rna_seq_only": {
-        "modality_weights": "rna_seq:1.0,splice_site:0.0,splice_usage:0.0,splice_junctions:0.0",
-        "init_strategy": "normal",
-        "use_gtf": False,
-        "num_segments": None,
-        "rope": "original",
-    },
-    "original__splice_site_only": {
-        "modality_weights": _SS_MW,
-        "init_strategy": "normal",
-        "use_gtf": False,
-        "num_segments": None,
-        "rope": "original",
-    },
-    "original__splice_usage_only": {
-        "modality_weights": "rna_seq:0.0,splice_site:0.0,splice_usage:1.0,splice_junctions:0.0",
-        "init_strategy": "normal",
-        "use_gtf": False,
-        "num_segments": None,
-        "rope": "original",
-    },
-    "original__splice_junctions_only": {
-        "modality_weights": _SJ_MW,
-        "init_strategy": "normal",
-        "use_gtf": False,
-        "num_segments": None,
-        "rope": "original",
-    },
+    # "original__rna_seq_only": {
+    #     "modality_weights": "rna_seq:1.0,splice_site:0.0,splice_usage:0.0,splice_junctions:0.0",
+    #     "init_strategy": "normal",
+    #     "use_gtf": False,
+    #     "num_segments": None,
+    #     "rope": "original",
+    # },
+    # "original__splice_site_only": {
+    #     "modality_weights": _SS_MW,
+    #     "init_strategy": "normal",
+    #     "use_gtf": False,
+    #     "num_segments": None,
+    #     "rope": "original",
+    # },
+    # "original__splice_usage_only": {
+    #     "modality_weights": "rna_seq:0.0,splice_site:0.0,splice_usage:1.0,splice_junctions:0.0",
+    #     "init_strategy": "normal",
+    #     "use_gtf": False,
+    #     "num_segments": None,
+    #     "rope": "original",
+    # },
+    # "original__splice_junctions_only": {
+    #     "modality_weights": _SJ_MW,
+    #     "init_strategy": "normal",
+    #     "use_gtf": False,
+    #     "num_segments": None,
+    #     "rope": "original",
+    # },
 }
 
 # 6 (head_init x segmented_loss x gtf_variant) configs x 2 modality-weight sets
@@ -101,51 +101,34 @@ for _cfg, _init, _ns, _gtf in _SS_CONFIGS:
             "rope":             "original",
         }
 
-# annotated mode: randinit + nogtf x 2 rope x 2 loss  (4 runs)
-# predicted mode: pretrinit x gtf/nogtf x 2 rope x 2 loss  (8 runs)
-_SJ_ANNOTATED_ROPES = [
-    #("origrope",  "original"),
-    ("truncrope", "truncated"),
-]
-_SJ_PREDICTED_CONFIGS = [
-    #("origrope_gtf",   "original",  True),
-    #("origrope_nogtf", "original",  False),
-    #("truncrope_gtf",  "truncated", True),
-    ("truncrope_nogtf","truncated", False),
-]
+# 4-way factorial: rope x loss x junction_position_source x junction_head_init (16 runs)
+# GTF never used. When source=="predicted", splice_site head always gets pretrained weights (idx 0).
+_SJ_ROPE_OPTIONS   = [("origrope",  "original"),   ("truncrope", "truncated")]
+_SJ_LOSS_OPTIONS   = [("origloss",  False),         ("newloss",   True)]
+_SJ_SOURCE_OPTIONS = [("annotated", "annotated"),   ("predicted", "predicted")]
+_SJ_JINIT_OPTIONS  = [("randinit",  "normal"),      ("pretrinit", "pretrained")]
 
 _DEBUG_SJ_RUNS = {}
-for _cfg, _rope in _SJ_ANNOTATED_ROPES:
-    for _loss_suffix, _new_loss in [("origloss", False), ("newloss", True)]:
-        for _mod_suffix, _mw in [("all", _ALL_MW)]:#, ("junction_only", _SJ_MW)]:
-            _key = "debug_splice_junctions__annotated__{}__{}__{}" .format(_cfg, _loss_suffix, _mod_suffix)
-            _DEBUG_SJ_RUNS[_key] = {
-                "modality_weights":         _mw,
-                "init_strategy":            "normal",
-                "use_gtf":                  False,
-                "num_segments":             None,
-                "rope":                     _rope,
-                "new_junction_loss":        _new_loss,
-                "junction_position_source": "annotated",
-            }
-
-for _cfg, _rope, _gtf in _SJ_PREDICTED_CONFIGS:
-    for _loss_suffix, _new_loss in [("origloss", False), ("newloss", True)]:
-        for _mod_suffix, _mw in [("all", _ALL_MW)]:#, ("junction_only", _SJ_MW)]:
-            _key = "debug_splice_junctions__predicted__{}__{}__{}" .format(_cfg, _loss_suffix, _mod_suffix)
-            _DEBUG_SJ_RUNS[_key] = {
-                "modality_weights":         _mw,
-                "init_strategy":            "pretrained",
-                "use_gtf":                  _gtf,
-                "num_segments":             None,
-                "rope":                     _rope,
-                "new_junction_loss":        _new_loss,
-                "junction_position_source": "predicted",
-            }
+for _rope_cfg, _rope in _SJ_ROPE_OPTIONS:
+    for _loss_suffix, _new_loss in _SJ_LOSS_OPTIONS:
+        for _src_suffix, _src in _SJ_SOURCE_OPTIONS:
+            for _jinit_suffix, _jinit in _SJ_JINIT_OPTIONS:
+                _key = "debug_splice_junctions__{}__{}__{}__{}" .format(
+                    _rope_cfg, _loss_suffix, _src_suffix, _jinit_suffix
+                )
+                _DEBUG_SJ_RUNS[_key] = {
+                    "modality_weights":         _ALL_MW,
+                    "use_gtf":                  False,
+                    "num_segments":             None,
+                    "rope":                     _rope,
+                    "new_junction_loss":        _new_loss,
+                    "junction_position_source": _src,
+                    "junction_head_init":       _jinit,
+                }
 
 ALL_RUNS = {}
-#ALL_RUNS.update(_ORIGINAL_RUNS)
-#ALL_RUNS.update(_DEBUG_SS_RUNS)
+ALL_RUNS.update(_ORIGINAL_RUNS)
+ALL_RUNS.update(_DEBUG_SS_RUNS)
 ALL_RUNS.update(_DEBUG_SJ_RUNS)
 
 _GROUP_RUNS = {
@@ -165,12 +148,15 @@ def _modality_weights(wildcards):
 
 
 def _pretrained_head_arg(wildcards):
-    if ALL_RUNS[wildcards.run_name]["init_strategy"] == "pretrained":
-        return (
-            "--pretrained-head-samples rna_seq:NA,splice_usage:NA,splice_junctions:NA,splice_site:0"
-            " --organism human"
-        )
-    return "--pretrained-head-samples rna_seq:NA,splice_usage:NA,splice_junctions:NA,splice_site:NA --organism human"
+    run = ALL_RUNS[wildcards.run_name]
+    # splice_site pretrained(0): when using predicted junction source, or when SS debug uses pretrained init
+    ss = "0" if (run.get("junction_position_source") == "predicted" or run.get("init_strategy") == "pretrained") else "NA"
+    # splice_junctions pretrained(139): only for SJ debug pretrinit runs
+    sj = "139" if run.get("junction_head_init") == "pretrained" else "NA"
+    return (
+        "--pretrained-head-samples rna_seq:NA,splice_usage:NA,splice_junctions:{},splice_site:{}"
+        " --organism human"
+    ).format(sj, ss)
 
 
 def _gtf_arg(wildcards, input):
@@ -258,14 +244,14 @@ rule overfit_single:
         modality_bigwig             = config["finetuning"]["alphagenome"]["sf3b1mut"]["modality_bigwig"],
         modality_splicing           = config["finetuning"]["alphagenome"]["sf3b1mut"]["modality_splicing"],
         sequence_length             = config["finetuning"]["alphagenome"]["sf3b1mut"]["sequence_length"],
-        lr                          = 1e-2,
+        lr                          = 2e-3,
         epochs                      = 500,
+        save_every                  = 100,
         batch_size                  = 1,
         gradient_accumulation_steps = 1,
         weight_decay                = 0.1,
         warmup_steps                = 20,
         track_means_samples         = config["finetuning"]["alphagenome"]["sf3b1mut"]["track_means_samples"],
-        save_every                  = 9999,
         output_dir                  = os.path.join(OUTPUT_DIR, "{density}"),
         modality_weights            = _modality_weights,
         pretrained_head_arg         = _pretrained_head_arg,
@@ -274,12 +260,12 @@ rule overfit_single:
         rope_arg                    = _rope_arg,
         new_loss_arg                = _new_loss_arg,
         junction_position_source_arg = _junction_position_source_arg,
-    threads: 3
+    threads: 20
     resources:
-        gres      = "gpu:3g.40gb:1",
-        partition = "gpu",
-        runtime   = 4 * 60,
-        memory    = 42,
+        runtime = int(2*60),  # hours in minutes
+        gres = "gpu:1",
+        partition = "acc_ehpc",
+        qos = "acc_ehpc"
     conda:
         "alphagenome_pytorch"
     retries: 0
@@ -316,7 +302,7 @@ rule overfit_single:
             --track-means-samples {params.track_means_samples} \
             --save-every {params.save_every} \
             --run-name {wildcards.run_name} \
-            --max-grad-norm inf \
+            --max-grad-norm 1.0 \
             --seed 1234 \
             {params.pretrained_head_arg} \
             {params.gtf_arg} \
@@ -327,7 +313,8 @@ rule overfit_single:
 
         rm -f "$FINETUNE_SCRIPT"
 
-        find "{params.output_dir}/{wildcards.run_name}" -name "*.pth" ! -name "best_model.pth" -delete
+        find "{params.output_dir}/{wildcards.run_name}" -name "*.pth" ! -name "best_model.pth" -printf "%T@ %p\n" \
+            | sort -n | head -n -1 | awk '{{print $2}}' | xargs -r rm -f
 
         echo "Done!"
         """
@@ -348,6 +335,11 @@ rule combine_epoch_logs:
     output:
         combined = os.path.join(OUTPUT_DIR, "summary", "epoch_logs.parquet")
     threads: 1
+    resources:
+        runtime = int(0.1*60),  # hours in minutes
+        gres = "none",
+        partition = "gpp",
+        qos = "gp_ehpc"
     run:
         import pandas as pd
 
