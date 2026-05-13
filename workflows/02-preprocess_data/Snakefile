@@ -44,7 +44,7 @@ rule all:
     input:
         os.path.join(SINGLE_DIR, "interval_ranking.tsv.gz"),
         expand(os.path.join(SINGLE_DIR, "{density}.bed"), density=DENSITIES),
-        #expand(os.path.join(DEV_DIR, "{split}.bed"), split=["train", "valid"]),
+        expand(os.path.join(DEV_DIR, "{split}.bed"), split=["train", "valid"]),
 
 
 rule rank_intervals:
