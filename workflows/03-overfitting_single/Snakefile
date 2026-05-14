@@ -1,20 +1,20 @@
 """
-Overfitting workflow: fine-tune AlphaGenome on 3 single density-tier intervals.
+Overfitting workflow: fine-tune AlphaGenome on a single medium-density interval.
 
 Depends on outputs from 02-preprocess_data (data/prep/overfitting/single/{density}.bed).
-Each interval is overfitted independently for 50 epochs (constant LR, linear-probe mode)
+Each interval is overfitted independently for 1000 epochs (constant LR, linear-probe mode)
 using paper_pass bigwigs and junction files from the 2 preprocessing samples.
 
-Three experiment groups, each run on high / medium / low density intervals:
+Three experiment groups, each run on the medium density interval:
 
   original            — baseline (randinit, no segmented loss, no GTF):
-                        5 modality-weight configs (all + 4 individual)
+                        1 modality-weight config x 2 dtypes
 
   debug_splice_sites  — ablate head_init x segmented_loss x GTF:
-                        6 selected configs x 2 modality-weight sets
+                        6 configs x 2 dtypes
 
-  debug_splice_junctions — ablate rope_init x GTF:
-                        4 configs x 2 modality-weight sets
+  debug_splice_junctions — ablate rope x loss x junction_source x head_init:
+                        16 configs x 2 dtypes
 
 Run with:
     snakemake -s workflows/03-overfitting_single/Snakefile --use-conda [-n]
@@ -49,35 +49,7 @@ _ORIGINAL_RUNS = {
         "use_gtf": False,
         "num_segments": None,
         "rope": "original",
-    },
-    # "original__rna_seq_only": {
-    #     "modality_weights": "rna_seq:1.0,splice_site:0.0,splice_usage:0.0,splice_junctions:0.0",
-    #     "init_strategy": "normal",
-    #     "use_gtf": False,
-    #     "num_segments": None,
-    #     "rope": "original",
-    # },
-    # "original__splice_site_only": {
-    #     "modality_weights": _SS_MW,
-    #     "init_strategy": "normal",
-    #     "use_gtf": False,
-    #     "num_segments": None,
-    #     "rope": "original",
-    # },
-    # "original__splice_usage_only": {
-    #     "modality_weights": "rna_seq:0.0,splice_site:0.0,splice_usage:1.0,splice_junctions:0.0",
-    #     "init_strategy": "normal",
-    #     "use_gtf": False,
-    #     "num_segments": None,
-    #     "rope": "original",
-    # },
-    # "original__splice_junctions_only": {
-    #     "modality_weights": _SJ_MW,
-    #     "init_strategy": "normal",
-    #     "use_gtf": False,
-    #     "num_segments": None,
-    #     "rope": "original",
-    # },
+    }
 }
 
 # 6 (head_init x segmented_loss x gtf_variant) configs x 2 modality-weight sets
@@ -149,8 +121,6 @@ _GROUP_RUNS = {
     "debug_splice_junctions": list(_DEBUG_SJ_RUNS.keys()),
 }
 
-print(_GROUP_RUNS)
-
 # ---------------------------------------------------------------------------
 # Parameter helper functions
 # ---------------------------------------------------------------------------
@@ -202,6 +172,12 @@ def _junction_position_source_arg(wildcards):
 def _dtype_arg(wildcards):
     return "--dtype {}".format(ALL_RUNS[wildcards.run_name]["dtype"])
 
+
+def _no_amp_arg(wildcards):
+    if ALL_RUNS[wildcards.run_name]["dtype"] == "float32":
+        return "--no-amp"
+    return ""
+
 # ---------------------------------------------------------------------------
 # Rules
 # ---------------------------------------------------------------------------
@@ -214,19 +190,6 @@ rule all:
             run_name=list(ALL_RUNS.keys()),
         ),
         os.path.join(OUTPUT_DIR, "summary", "epoch_logs.parquet"),
-        # expand(
-        #     os.path.join(OUTPUT_DIR, "{density}", "{run_name}", "visualization", "summary_stats.parquet"),
-        #     density=DENSITIES,
-        #     run_name=list(ALL_RUNS.keys()),
-        # ),
-        # expand(
-        #     os.path.join(OUTPUT_DIR, "summary", "{group}.pdf"),
-        #     group=list(_GROUP_RUNS.keys()),
-        # ),
-        # expand(
-        #     os.path.join(OUTPUT_DIR, "summary", "{group}_loss_curves.pdf"),
-        #     group=list(_GROUP_RUNS.keys()),
-        # ),
 
 
 rule overfit_single:
@@ -260,13 +223,13 @@ rule overfit_single:
         modality_bigwig             = config["finetuning"]["alphagenome"]["sf3b1mut"]["modality_bigwig"],
         modality_splicing           = config["finetuning"]["alphagenome"]["sf3b1mut"]["modality_splicing"],
         sequence_length             = config["finetuning"]["alphagenome"]["sf3b1mut"]["sequence_length"],
-        lr                          = 2e-3,
-        epochs                      = 500,
-        save_every                  = 100,
+        lr                          = 1e-3,
+        weight_decay                = 0,
+        warmup_steps                = 0,
+        epochs                      = 1000,
+        save_every                  = 250,
         batch_size                  = 1,
         gradient_accumulation_steps = 1,
-        weight_decay                = 0.1,
-        warmup_steps                = 20,
         track_means_samples         = config["finetuning"]["alphagenome"]["sf3b1mut"]["track_means_samples"],
         output_dir                  = os.path.join(OUTPUT_DIR, "{density}"),
         modality_weights            = _modality_weights,
@@ -277,9 +240,10 @@ rule overfit_single:
         new_loss_arg                = _new_loss_arg,
         junction_position_source_arg = _junction_position_source_arg,
         dtype_arg                    = _dtype_arg,
+        no_amp_arg                   = _no_amp_arg,
     threads: 20
     resources:
-        runtime = int(2*60),  # hours in minutes
+        runtime = int(4*60),  # hours in minutes
         gres = "gpu:1",
         partition = "acc_ehpc",
         qos = "acc_ehpc"
@@ -310,8 +274,9 @@ rule overfit_single:
             --resume auto \
             --lr {params.lr} \
             --warmup-steps {params.warmup_steps} \
-            --lr-schedule cosine \
+            --lr-schedule constant \
             --weight-decay {params.weight_decay} \
+            --batch-size {params.batch_size} \
             --gradient-accumulation-steps {params.gradient_accumulation_steps} \
             --epochs {params.epochs} \
             --output-dir {params.output_dir} \
@@ -327,7 +292,8 @@ rule overfit_single:
             {params.rope_arg} \
             {params.new_loss_arg} \
             {params.junction_position_source_arg} \
-            {params.dtype_arg}
+            {params.dtype_arg} \
+            {params.no_amp_arg}
 
         rm -f "$FINETUNE_SCRIPT"
 
@@ -375,116 +341,3 @@ rule combine_epoch_logs:
         combined.to_parquet(output.combined, index=False, compression="zstd")
 
         print("Done!")
-
-# rule visualize_single:
-#     """Visualize predictions vs real tracks for genes overlapping the overfitting interval."""
-#     wildcard_constraints:
-#         density  = "|".join(DENSITIES),
-#         run_name = "|".join(ALL_RUNS.keys()),
-#     input:
-#         checkpoint     = os.path.join(OUTPUT_DIR, "{density}", "{run_name}", "best_model.pth"),
-#         bed            = os.path.join(SINGLE_BED_DIR, "{density}.bed"),
-#         genome         = config["gencode"]["paths"]["fasta"],
-#         gtf            = config["gencode"]["paths"]["gtf"],
-#         gtf_parquet    = config["gencode"]["paths"]["gtf_parquet"],
-#         bigwigs        = [
-#             os.path.join(DATA_DIR, "STAR", sample,
-#                          "paper_pass.Aligned.sortedByCoord.out.filtered." + strand + ".bw")
-#             for sample in SAMPLES
-#             for strand in BIGWIG_STRANDS
-#         ],
-#         star_junctions = [
-#             os.path.join(DATA_DIR, "STAR", sample, "paper_pass.SJ.out.tab")
-#             for sample in SAMPLES
-#         ],
-#         ssu_parquets = [
-#             os.path.join(DATA_DIR, "STAR", sample, "paper_pass.ssu.parquet")
-#             for sample in SAMPLES
-#         ],
-#     output:
-#         summary = os.path.join(OUTPUT_DIR, "{density}", "{run_name}", "visualization", "summary_stats.parquet"),
-#     params:
-#         script    = "src/scripts/visualize_overfit.py",
-#         sequence_length = config["finetuning"]["alphagenome"]["sf3b1mut"]["sequence_length"],
-#         viz_dir   = lambda wildcards: os.path.join(
-#             OUTPUT_DIR, wildcards.density, wildcards.run_name, "visualization"
-#         ),
-#         gtf_arg   = lambda wildcards, input: (
-#             "--gtf-splice-sites {}".format(input.gtf_parquet)
-#             if ALL_RUNS[wildcards.run_name]["use_gtf"]
-#             else ""
-#         ),
-#     conda:
-#         "alphagenome_pytorch"
-#     shell:
-        """
-        mkdir -p {params.viz_dir}
-        python {params.script} \
-            --checkpoint {input.checkpoint} \
-            --bed {input.bed} \
-            --genome {input.genome} \
-            --gtf {input.gtf} \
-            --bigwig {input.bigwigs} \
-            --star-junctions {input.star_junctions} \
-            --ssu {input.ssu_parquets} \
-            --sequence-length {params.sequence_length} \
-            --output-dir {params.viz_dir} \
-            {params.gtf_arg}
-        """
-
-# rule plot_group_summary:
-#     """Plot training dynamics and prediction correlations for all runs in an experiment group."""
-#     wildcard_constraints:
-#         group = "|".join(_GROUP_RUNS.keys()),
-#     input:
-#         summaries = lambda wildcards: expand(
-#             os.path.join(OUTPUT_DIR, "{density}", "{run_name}", "visualization", "summary_stats.parquet"),
-#             density=DENSITIES,
-#             run_name=_GROUP_RUNS[wildcards.group],
-#         ),
-#     output:
-#         pdf = os.path.join(OUTPUT_DIR, "summary", "{group}.pdf"),
-#     params:
-#         script   = "src/scripts/plot_overfit_summary.py",
-#         run_dirs = lambda wildcards: [
-#             os.path.join(OUTPUT_DIR, density, run_name)
-#             for density in DENSITIES
-#             for run_name in _GROUP_RUNS[wildcards.group]
-#         ],
-#     conda:
-#         "alphagenome_pytorch"
-#     shell:
-#         """
-#         mkdir -p "$(dirname {output.pdf})"
-#         python {params.script} \
-#             --run-dirs {params.run_dirs} \
-#             --output {output.pdf}
-#         """
-
-
-# rule plot_curves:
-#     """Plot training loss curves (total + per modality) for original__all across densities."""
-#     wildcard_constraints:
-#         group = "|".join(_GROUP_RUNS.keys()),
-#     input:
-#         logs = lambda wildcards: expand(
-#             os.path.join(OUTPUT_DIR, "{density}", "{{group}}__all", "epoch_log.csv"),
-#             density=DENSITIES,
-#         ),
-#     output:
-#         pdf = os.path.join(OUTPUT_DIR, "summary", "{group}_loss_curves.pdf"),
-#     params:
-#         script   = "src/scripts/plot_overfitting_single_curves.py",
-#         run_dirs = lambda wildcards: [
-#             os.path.join(OUTPUT_DIR, density, wildcards.group + "__all")
-#             for density in DENSITIES
-#         ],
-#     conda:
-#         "alphagenome_finetuning_rna"
-#     shell:
-#         """
-#         mkdir -p "$(dirname {output.pdf})"
-#         python {params.script} \
-#             --run-dirs {params.run_dirs} \
-#             --output {output.pdf}
-#         """
