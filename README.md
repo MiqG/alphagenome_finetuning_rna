@@ -40,13 +40,21 @@
 
 3. overfitting single (`workflows/03-overfitting_single/Snakefile`)
 
-   ```bash
-   snakemake -s workflows/03-overfitting_single/Snakefile --use-conda -j <cores>
-   ```
+    ```bash
+    snakemake -s workflows/03-overfitting_single/Snakefile --use-conda -j <cores>
+    ```
 
-   ```bash
-   sbatch src/scripts/submit_snakemake_slurm.sh 'snakemake --cluster "sbatch --cpus-per-task={threads} --mem={resources.memory}G --time={resources.runtime} --partition={resources.partition} --qos=normal --gres={resources.gres} --parsable" --cluster-status src/scripts/status-sacct.sh --jobs 30 --use-conda -s workflows/03-overfitting_single/Snakefile --latency-wait 60 --keep-going --rerun-incomplete --rerun-triggers mtime'
-   ```
+    ```bash
+    # crg
+    
+    sbatch src/scripts/submit_snakemake_slurm.sh 'snakemake --cluster "sbatch --cpus-per-task={threads} --mem={resources.memory}G --time={resources.runtime} --partition={resources.partition} --qos=normal --gres={resources.gres} --parsable" --cluster-status src/scripts/status-sacct.sh --jobs 30 --use-conda -s workflows/03-overfitting_single/Snakefile --latency-wait 60 --keep-going --rerun-incomplete --rerun-triggers mtime'
+    ```
+
+    ```bash
+    # bsc
+    
+    sbatch src/scripts/submit_snakemake_slurm.sh 'snakemake --cluster "sbatch --account=ehpc708 --cpus-per-task={threads} --time={resources.runtime} --partition={resources.partition} --qos={resources.qos} --gres={resources.gres} --parsable" --cluster-status src/scripts/status-sacct.sh --jobs 365 --use-conda -s workflows/03-overfitting_single/Snakefile --latency-wait 60 --rerun-incomplete --keep-going'
+    ```
 
    Overfits AlphaGenome for 50 epochs (constant LR, no warmup, linear-probe mode) on each of
    the 3 single intervals (high / medium / low splice junction density) from `02-preprocess_data`.
@@ -93,9 +101,17 @@
    snakemake -s workflows/04-overfitting_dev/Snakefile --use-conda -j <cores>
    ```
 
-   ```bash
-   sbatch src/scripts/submit_snakemake_slurm.sh 'snakemake --cluster "sbatch --cpus-per-task={threads} --mem={resources.memory}G --time={resources.runtime} --partition={resources.partition} --qos=normal --gres={resources.gres} --parsable" --cluster-status src/scripts/status-sacct.sh --jobs 30 --use-conda -s workflows/04-overfitting_dev/Snakefile --latency-wait 60 --keep-going --rerun-incomplete --rerun-triggers mtime'
-   ```
+    ```bash
+    # crg
+
+    sbatch src/scripts/submit_snakemake_slurm.sh 'snakemake --cluster "sbatch --cpus-per-task={threads} --mem={resources.memory}G --time={resources.runtime} --partition={resources.partition} --qos=normal --gres={resources.gres} --parsable" --cluster-status src/scripts/status-sacct.sh --jobs 30 --use-conda -s workflows/04-overfitting_dev/Snakefile --latency-wait 60 --keep-going --rerun-incomplete --rerun-triggers mtime'
+    ```
+   
+    ```bash
+    # bsc
+    
+    sbatch src/scripts/submit_snakemake_slurm.sh 'snakemake --cluster "sbatch --account=ehpc708 --cpus-per-task={threads} --time={resources.runtime} --partition={resources.partition} --qos={resources.qos} --gres={resources.gres} --parsable" --cluster-status src/scripts/status-sacct.sh --jobs 365 --use-conda -s workflows/04-overfitting_dev/Snakefile --latency-wait 60 --rerun-incomplete --keep-going'
+    ```
    
    Overfits AlphaGenome for 50 epochs (constant LR, no warmup, linear-probe mode) on the dev
    dataset (train/val split) from `02-preprocess_data`. All runs use `paper_pass` bigwigs and
