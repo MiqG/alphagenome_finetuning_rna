@@ -33,6 +33,10 @@ SAMPLES        = config["preprocessing"]["overfitting"]["samples"]
 DENSITIES      = ["medium"]
 DTYPES         = ["bfloat16", "float32"]
 BIGWIG_STRANDS = ["forward", "reverse"]
+RUN_NAMES_OI = [
+    "debug_splice_junctions__truncrope__origloss__predicted__pretrinit__float32",
+    "fix_splice_junctions__sparseloss__truncrope__predicted__pretrinit__float32",
+]
 
 # ---------------------------------------------------------------------------
 # Run configuration
@@ -99,6 +103,28 @@ for _rope_cfg, _rope in _SJ_ROPE_OPTIONS:
                     "junction_head_init":       _jinit,
                 }
 
+# sparse loss: 2x2x2 factorial (rope x source x init), float32 only
+# Tests whether restricting CE+Poisson to observed donors/acceptors fixes the
+# suppression gradient that caused finetuned r=-0.12 vs pretrained r=0.7.
+_SPARSE_SJ_RUNS = {}
+for _rope_cfg, _rope in _SJ_ROPE_OPTIONS:
+    for _src_suffix, _src in _SJ_SOURCE_OPTIONS:
+        for _jinit_suffix, _jinit in _SJ_JINIT_OPTIONS:
+            _key = "fix_splice_junctions__sparseloss__{}__{}__{}__{}" .format(
+                _rope_cfg, _src_suffix, _jinit_suffix, "float32"
+            )
+            _SPARSE_SJ_RUNS[_key] = {
+                "modality_weights":         _ALL_MW,
+                "use_gtf":                  False,
+                "num_segments":             None,
+                "rope":                     _rope,
+                "junction_loss":            "sparse",
+                "junction_position_source": _src,
+                "junction_head_init":       _jinit,
+                "dtype":                    "float32",
+            }
+
+
 def _add_dtype_variants(runs):
     result = {}
     for key, cfg in runs.items():
@@ -114,11 +140,13 @@ ALL_RUNS = {}
 ALL_RUNS.update(_ORIGINAL_RUNS)
 ALL_RUNS.update(_DEBUG_SS_RUNS)
 ALL_RUNS.update(_DEBUG_SJ_RUNS)
+ALL_RUNS.update(_SPARSE_SJ_RUNS)
 
 _GROUP_RUNS = {
-    "original":               list(_ORIGINAL_RUNS.keys()),
-    "debug_splice_sites":     list(_DEBUG_SS_RUNS.keys()),
-    "debug_splice_junctions": list(_DEBUG_SJ_RUNS.keys()),
+    "original":                list(_ORIGINAL_RUNS.keys()),
+    "debug_splice_sites":      list(_DEBUG_SS_RUNS.keys()),
+    "debug_splice_junctions":  list(_DEBUG_SJ_RUNS.keys()),
+    "fix_splice_junctions":    list(_SPARSE_SJ_RUNS.keys()),
 }
 
 # ---------------------------------------------------------------------------
@@ -159,7 +187,11 @@ def _rope_arg(wildcards):
 
 
 def _new_loss_arg(wildcards):
-    if ALL_RUNS[wildcards.run_name].get("new_junction_loss", False):
+    run = ALL_RUNS[wildcards.run_name]
+    jl = run.get("junction_loss", None)
+    if jl is not None:
+        return "--junction-loss {}".format(jl)
+    if run.get("new_junction_loss", False):
         return "--junction-loss normalized"
     return "--junction-loss original"
 
@@ -190,6 +222,12 @@ rule all:
             run_name=list(ALL_RUNS.keys()),
         ),
         os.path.join(OUTPUT_DIR, "summary", "epoch_logs.parquet"),
+        expand(
+            os.path.join(OUTPUT_DIR, "{density}", "{run_name}", "rna_seq.npz"),
+            density=DENSITIES,
+            run_name=RUN_NAMES_OI,
+        ),
+
 
 
 rule overfit_single:
@@ -341,3 +379,42 @@ rule combine_epoch_logs:
         combined.to_parquet(output.combined, index=False, compression="zstd")
 
         print("Done!")
+
+rule finetuned_forward_pass_single:
+    """Run fine-tuned AlphaGenome forward pass on each single density interval for runs of interest."""
+    wildcard_constraints:
+        density  = "|".join(DENSITIES),
+        run_name = "|".join(RUN_NAMES_OI),
+    input:
+        bed        = os.path.join(SINGLE_BED_DIR, "{density}.bed"),
+        weights    = config["alphagenome_pytorch"]["paths"]["weights"],
+        genome     = config["gencode"]["paths"]["fasta"],
+        checkpoint = os.path.join(OUTPUT_DIR, "{density}", "{run_name}", "best_model.pth"),
+    output:
+        rna_seq        = os.path.join(OUTPUT_DIR, "{density}", "{run_name}", "rna_seq.npz"),
+        classification = os.path.join(OUTPUT_DIR, "{density}", "{run_name}", "splice_classification.npz"),
+        usage          = os.path.join(OUTPUT_DIR, "{density}", "{run_name}", "splice_usage.npz"),
+        junctions      = os.path.join(OUTPUT_DIR, "{density}", "{run_name}", "splice_junctions.npz"),
+        metadata       = os.path.join(OUTPUT_DIR, "{density}", "{run_name}", "metadata.json"),
+    params:
+        script  = "src/scripts/run_pretrained_forward_pass.py",
+        out_dir = os.path.join(OUTPUT_DIR, "{density}", "{run_name}"),
+        seq_len = config["finetuning"]["alphagenome"]["sf3b1mut"]["sequence_length"],
+    threads: 4
+    resources:
+        runtime   = int(0.5 * 60),
+        gres      = "gpu:1",
+        partition = "acc_ehpc",
+        qos       = "acc_ehpc"
+    conda:
+        "alphagenome_pytorch"
+    shell:
+        """
+        python {params.script} \
+            --weights {input.weights} \
+            --checkpoint {input.checkpoint} \
+            --bed {input.bed} \
+            --genome {input.genome} \
+            --sequence-length {params.seq_len} \
+            --output-dir {params.out_dir}
+        """
