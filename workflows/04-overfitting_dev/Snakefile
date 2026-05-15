@@ -200,10 +200,10 @@ rule overfit_dev:
         new_loss_arg                = _new_loss_arg,
         mode_args                        = _mode_args,
         junction_position_source_arg     = _junction_position_source_arg,
-    threads: 20
+    threads: 10
     resources:
         runtime = int(4*60),  # hours in minutes
-        memory = 42,
+        memory = 64,
         gres = "gpu:7g.80gb:1",
         partition = "gpu"
     conda:

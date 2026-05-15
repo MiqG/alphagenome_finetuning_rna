@@ -17,7 +17,7 @@ metadata = metadata.loc[metadata["library_source"]=="TRANSCRIPTOMIC"]
 URLS = metadata["fastq_ftp"].str.split(";").str[0].apply(os.path.dirname).to_list()
 URLS = {os.path.basename(url): url for url in URLS}
 SAMPLES = list(URLS.keys())
-SAMPLES = ["SRR17111303","SRR17111311"]
+SAMPLES = ["SRR17111303","SRR17111311"] + ["SRR17111301","SRR17111304","SRR17111307"]
 N_SAMPLES = len(SAMPLES)
 
 ## fastq sizes
@@ -54,147 +54,6 @@ rule download_fastq:
         echo "Finished downloading {params.sample}."
         echo $(date)
         
-        echo "Done!"
-        """
-        
-rule star_first_pass:
-    input:
-        download_done = [os.path.join(DATA_DIR,"fastqs",".done","{sample}_{end}").format(end=end, sample="{sample}") for end in ENDS],
-        genome_dir = config["gencode"]["paths"]["star_index"]
-    params:
-        sample = "{sample}",
-        fastqs_dir = os.path.join(DATA_DIR,"fastqs"),        
-        output_dir = os.path.join(DATA_DIR,"STAR","{sample}"),
-        tmp_dir = os.path.join(TMP_ROOT,"sf3b1mut","{sample}"),
-    output:
-        align_done = touch(os.path.join(DATA_DIR,"STAR",".done_align_first","{sample}"))
-    threads: 6
-    resources:
-        gres = "none",
-        partition = "genoa64",
-        runtime = 6*60, # h
-        memory = 40 # G
-    conda:
-        "alphagenome_finetuning_rna"
-    shell:
-        """
-        set -eo pipefail
-        
-        echo $(ulimit -n)
-        ulimit -n 2048 # otherwise error
-        echo $(ulimit -n)
-        
-        if [ -d {params.tmp_dir} ]; then
-          rm -r {params.tmp_dir}
-        fi
-
-        nice STAR \
-            --genomeDir {input.genome_dir} \
-            --genomeLoad NoSharedMemory \
-            --readFilesIn {params.fastqs_dir}/{params.sample}_1.fastq.gz {params.fastqs_dir}/{params.sample}_2.fastq.gz \
-            --readFilesCommand "pigz -cd -p {threads}" \
-            --outSAMtype BAM Unsorted \
-            --outFileNamePrefix {params.output_dir}/first_pass. \
-            --outTmpDir {params.tmp_dir} \
-            --runThreadN {threads}
-        
-        if [ -d {params.tmp_dir} ]; then
-          rm -r {params.tmp_dir}
-        fi
-        
-        echo "Done!"
-        """
-        
-rule merge_first_pass_splice_junctions:
-    input:
-        align_done = os.path.join(DATA_DIR,"STAR",".done_align_first","{sample}")
-    params:
-        output_dir = os.path.join(DATA_DIR,"STAR","{sample}")
-    output:
-        merge_junctions_done = touch(os.path.join(DATA_DIR,"STAR",".done_merge_junc","{sample}"))
-    threads: 1
-    resources:
-        gres = "none",
-        partition = "genoa64",
-        runtime = 1*60, # h
-        memory = 2 # GB
-    conda:
-        "alphagenome_finetuning_rna"
-    shell:
-        """
-        set -eo pipefail
-        
-        cat {params.output_dir}/first_pass.SJ.out.tab \
-        | awk '$7 >= 3' \
-        | cut -f1-4 \
-        | sort -u \
-        > {params.output_dir}/first_pass.SJ.out.merged.tab
-        
-        echo "Done!"
-        """
-        
-rule star_second_pass:
-    input:
-        merge_junctions_done = os.path.join(DATA_DIR,"STAR",".done_merge_junc","{sample}"),
-        genome_dir = config["gencode"]["paths"]["star_index"]
-    params:
-        sample = "{sample}",
-        fastqs_dir = os.path.join(DATA_DIR,"fastqs"),        
-        output_dir = os.path.join(DATA_DIR,"STAR","{sample}"),
-        tmp_dir = os.path.join(TMP_ROOT,"sf3b1mut","{sample}"),
-        memory_limit = 20000000000
-    output:
-        align_done = touch(os.path.join(DATA_DIR,"STAR",".done_align_second","{sample}"))
-    threads: 6
-    resources:
-        gres = "none",
-        partition = "genoa64",
-        runtime = 6*60, # h
-        memory = 40 # G
-    conda:
-        "alphagenome_finetuning_rna"
-    shell:
-        """
-        set -eo pipefail
-        
-        if [ -d {params.tmp_dir} ]; then
-          rm -r {params.tmp_dir}
-        fi
-
-        STAR \
-            --genomeDir {input.genome_dir} \
-            --genomeLoad NoSharedMemory \
-            --readFilesIn {params.fastqs_dir}/{params.sample}_1.fastq.gz {params.fastqs_dir}/{params.sample}_2.fastq.gz \
-            --readFilesCommand "pigz -cd -p {threads}" \
-            --outSAMtype BAM Unsorted \
-            --outFileNamePrefix {params.output_dir}/second_pass. \
-            --outTmpDir {params.tmp_dir} \
-            --runThreadN {threads} \
-            --sjdbFileChrStartEnd {params.output_dir}/first_pass.SJ.out.merged.tab \
-            --outFilterType BySJout \
-            --outFilterMultimapNmax 20 \
-            --alignSJoverhangMin 8 \
-            --alignSJDBoverhangMin 1 \
-            --outFilterMismatchNmax 999 \
-            --outFilterMismatchNoverReadLmax 0.04 \
-            --alignIntronMin 20 \
-            --alignIntronMax 1000000 \
-            --alignMatesGapMax 1000000 \
-            --quantMode GeneCounts TranscriptomeSAM
-                    
-        # sort BAM
-        sambamba sort \
-            --nthreads {threads} \
-            --show-progress \
-            --tmpdir {params.tmp_dir} \
-            --memory-limit {params.memory_limit} \
-            --out {params.output_dir}/second_pass.Aligned.sortedByCoord.out.bam \
-            {params.output_dir}/second_pass.Aligned.out.bam
-
-        if [ -d {params.tmp_dir} ]; then
-          rm -r {params.tmp_dir}
-        fi
-
         echo "Done!"
         """
 
@@ -291,57 +150,6 @@ rule sort_paper_pass:
             --out {params.output_dir}/paper_pass.Aligned.sortedByCoord.out.bam \
             {params.output_dir}/paper_pass.Aligned.out.bam
 
-        echo "Done!"
-        """
-
-
-rule star_combine_genexpr:
-    input:
-        [os.path.join(DATA_DIR,"STAR",".done_align_second","{sample}").format(sample=sample) for sample in SAMPLES]
-    output:
-        counts = os.path.join(DATA_DIR,"STAR","merged.second_pass.ReadsPerGene.out.tab.gz")
-    params:
-        counts_col = 2,
-        star_out = os.path.join(DATA_DIR,"STAR"),
-        done_dir = os.path.join(DATA_DIR,"STAR",".done_align_second")
-    threads: 1
-    resources:
-        gres = "none",
-        partition = "genoa64",
-        runtime = 6*60, # h
-        memory = 2 # G
-    conda:
-        "alphagenome_finetuning_rna"
-    shell:
-        """
-        set -euo pipefail
-        
-        echo "Combining gene expression..."
-        
-        SAMPLES=$(ls {params.done_dir})
-        COUNTER=0
-        for SAMPLE in $SAMPLES; do
-            
-            echo $SAMPLE
-            
-            if [ "$COUNTER" -eq "0" ]; then
-                # for first iteration, add gene column
-                cat {params.star_out}/$SAMPLE/second_pass.ReadsPerGene.out.tab | sed 1,4d | cut -f1,{params.counts_col} | sed "1i ENSEMBL\t$SAMPLE" > {params.star_out}/tmp
-                
-            else
-                # take only mRNA counts for the rest
-                paste {params.star_out}/tmprev <(cat {params.star_out}/$SAMPLE/second_pass.ReadsPerGene.out.tab | sed 1,4d | cut -f{params.counts_col} | sed "1i $SAMPLE") > {params.star_out}/tmp
-            fi
-            
-            mv {params.star_out}/tmp {params.star_out}/tmprev
-            
-            COUNTER=$[$COUNTER +1]
-        done
-        
-        mv {params.star_out}/tmprev {output.counts}
-        gzip -f {output.counts}
-        mv {output.counts}.gz {output.counts}
-        
         echo "Done!"
         """
 
@@ -529,13 +337,13 @@ rule get_mapped_reads:
 
 rule compute_ssu:
     input:
-        junctions = os.path.join(DATA_DIR,"STAR","{sample}","paper_pass.SJ.out.tab"),
-        bam = os.path.join(DATA_DIR,"STAR","{sample}","paper_pass.Aligned.sortedByCoord.out.filtered.bam"),
         filt_done = os.path.join(DATA_DIR,"STAR",".done_prep_bam","{sample}")
     output:
         ssu = os.path.join(DATA_DIR,"STAR","{sample}","paper_pass.ssu.parquet")
     params:
-        script = "src/alphagenome-pytorch/scripts/compute_ssu.py"
+        script = "src/alphagenome-pytorch/scripts/compute_ssu.py",
+        junctions = os.path.join(DATA_DIR,"STAR","{sample}","paper_pass.SJ.out.tab"),
+        bam = os.path.join(DATA_DIR,"STAR","{sample}","paper_pass.Aligned.sortedByCoord.out.filtered.bam"),
     threads: 1
     resources:
         gres = "none",
@@ -549,8 +357,8 @@ rule compute_ssu:
         set -eo pipefail
 
         python {params.script} \
-            --junctions {input.junctions} \
-            --bam {input.bam} \
+            --junctions {params.junctions} \
+            --bam {params.bam} \
             --output {output.ssu}
 
         echo "Done!"

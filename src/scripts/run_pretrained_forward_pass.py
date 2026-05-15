@@ -59,6 +59,7 @@ def main():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--weights", required=True, help="Pretrained AlphaGenome .safetensors")
+    parser.add_argument("--checkpoint", default=None, help="Fine-tuned checkpoint .pth (model_state_dict loaded on top of pretrained weights)")
     parser.add_argument("--bed", required=True, help="BED file with interval to predict on")
     parser.add_argument("--genome", required=True, help="Reference genome FASTA (.gz ok)")
     parser.add_argument("--sequence-length", type=int, default=1_048_576)
@@ -69,8 +70,43 @@ def main():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
-    print(f"Loading model from {args.weights}")
-    model = AlphaGenome.from_pretrained(args.weights, device=device)
+
+    if args.checkpoint:
+        from alphagenome_pytorch.extensions.finetuning.transfer import load_trunk, remove_all_heads, add_head
+        from alphagenome_pytorch.extensions.finetuning.heads import create_finetuning_head
+
+        print(f"Loading fine-tuned checkpoint from {args.checkpoint}")
+        ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
+        track_names: dict = ckpt["track_names"]   # {modality: [name, ...]}
+        resolutions: dict = ckpt["resolutions"]    # {modality: (int, ...)}
+
+        # Rebuild model with the same head architecture as during fine-tuning,
+        # then load the full state dict (trunk + custom heads).
+        print(f"Rebuilding model from pretrained trunk {args.weights}")
+        model = AlphaGenome()
+        model = load_trunk(model, args.weights, exclude_heads=True)
+        model = remove_all_heads(model)
+
+        for modality, names in track_names.items():
+            n_tracks = len(names)
+            if modality == "splice_junctions":
+                n_tracks = n_tracks // 2
+            mod_res = resolutions[modality] if isinstance(resolutions, dict) else resolutions
+            head = create_finetuning_head(
+                assay_type=modality,
+                n_tracks=n_tracks,
+                resolutions=mod_res,
+                num_organisms=1,
+            )
+            add_head(model, modality, head)
+            print(f"  Added {modality} head: {len(names)} tracks at resolutions {mod_res}")
+
+        model.load_state_dict(ckpt["model_state_dict"])
+        model = model.to(device)
+    else:
+        print(f"Loading model from {args.weights}")
+        model = AlphaGenome.from_pretrained(args.weights, device=device)
+
     model.eval()
 
     import pyfaidx
