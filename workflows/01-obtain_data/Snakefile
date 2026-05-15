@@ -44,12 +44,13 @@ rule all:
             split=["train", "valid", "test"],
         ),
 
-        # SSU comparison with SpliSER
+        # SSU comparison: custom compute_ssu vs SpliSER, with resource benchmarks
         expand(
-            os.path.join(SSU_OUTPUT_DIR, "{sample}", "ssu_comparison.parquet"),
+            os.path.join(SSU_OUTPUT_DIR, "custom", "{sample}", "paper_pass.ssu.parquet"),
             sample=SSU_BENCHMARK_SAMPLES,
         ),
         expand(
-            os.path.join(SSU_OUTPUT_DIR, "{sample}", "spliser_comparison.parquet"),
+            os.path.join(SSU_OUTPUT_DIR, "spliser", "{sample}", "{sample}.SpliSER.tsv"),
             sample=SSU_BENCHMARK_SAMPLES,
         ),
+        os.path.join(SSU_OUTPUT_DIR, "benchmarks", "benchmarks.parquet"),

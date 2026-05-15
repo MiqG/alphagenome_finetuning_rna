@@ -1,17 +1,12 @@
 import pandas as pd
 
 # Two samples with completed two-pass STAR alignment and BAM prep
-SSU_BENCHMARK_SAMPLES = ["SRR17111301", "SRR17111311"]
+SSU_BENCHMARK_SAMPLES = ["SRR17111303","SRR17111311"]
 
-# Reuses support/overfit.bed so the benchmark runs on the same intervals as overfitting
-SSU_BED = os.path.join("support", "overfit.bed")
+SSU_OUTPUT_DIR = "results/sanity_checks/comparison_ssu"
 
-SSU_OUTPUT_DIR = "results/sanity_checks/ssu_benchmark"
-
-# SpliSER runs per-chromosome; derived from BED file
-_bed_df = pd.read_csv(SSU_BED, sep="\t", header=None, usecols=[0], names=["chrom"])
-SSU_CHROMS = sorted(_bed_df["chrom"].unique().tolist())
-
+# chromosome for benchmark
+SSU_CHROMS = ["chr1"]
 
 def _bam_path(sample):
     return os.path.join(
@@ -25,36 +20,38 @@ def _junctions_path(sample):
         "paper_pass.SJ.out.tab",
     )
 
-
-rule benchmark_ssu_approximation:
-    """Compare junction-only SSU approximation to BAM-derived ground truth."""
+rule compute_ssu_benchmark:
     input:
-        bam       = lambda wc: _bam_path(wc.sample),
-        bam_bai   = lambda wc: _bam_path(wc.sample) + ".bai",
-        junctions = lambda wc: _junctions_path(wc.sample),
-        bed       = SSU_BED,
+        junctions = os.path.join(DATA_DIR,"STAR","{sample}","paper_pass.SJ.out.tab"),
+        bam       = os.path.join(DATA_DIR,"STAR","{sample}","paper_pass.Aligned.sortedByCoord.out.filtered.bam"),
+        bam_bai   = os.path.join(DATA_DIR,"STAR","{sample}","paper_pass.Aligned.sortedByCoord.out.filtered.bam.bai"),
     output:
-        parquet = os.path.join(SSU_OUTPUT_DIR, "{sample}", "ssu_comparison.parquet"),
-        pdf     = os.path.join(SSU_OUTPUT_DIR, "{sample}", "ssu_scatterplot.pdf"),
+        ssu = os.path.join(SSU_OUTPUT_DIR,"custom","{sample}","paper_pass.ssu.parquet")
+    benchmark:
+        os.path.join(SSU_OUTPUT_DIR, "benchmarks", "{sample}", "compute_ssu.tsv")
     params:
-        script           = "src/scripts/benchmark_ssu_approximation.py",
-        output_dir       = lambda wc: os.path.join(SSU_OUTPUT_DIR, wc.sample),
-        min_unique_reads = 1,
-        mapq             = 30,
+        script = "src/alphagenome-pytorch/scripts/compute_ssu.py",
+        chroms = " ".join(SSU_CHROMS)
+    threads: 1
+    resources:
+        gres = "none",
+        partition = "genoa64",
+        runtime = 2*60,  # h in minutes
+        memory = 8  # G
     conda:
         "alphagenome_pytorch"
     shell:
         """
-        mkdir -p {params.output_dir}
-        python {params.script} \
-            --bam {input.bam} \
-            --junctions {input.junctions} \
-            --interval {input.bed} \
-            --output-dir {params.output_dir} \
-            --min-unique-reads {params.min_unique_reads} \
-            --mapq {params.mapq}
-        """
+        set -eo pipefail
 
+        python {params.script} \
+            --junctions {input.junctions} \
+            --bam {input.bam} \
+            --chroms {params.chroms} \
+            --output {output.ssu}
+
+        echo "Done!"
+        """
 
 rule spliser_process:
     """Run SpliSER process on benchmark chromosomes to get BAM-derived SSE."""
@@ -62,11 +59,13 @@ rule spliser_process:
         bam     = lambda wc: _bam_path(wc.sample),
         bam_bai = lambda wc: _bam_path(wc.sample) + ".bai",
     output:
-        tsv = os.path.join(SSU_OUTPUT_DIR, "{sample}", "{sample}.SpliSER.tsv"),
+        tsv = os.path.join(SSU_OUTPUT_DIR, "spliser", "{sample}", "{sample}.SpliSER.tsv"),
+    benchmark:
+        os.path.join(SSU_OUTPUT_DIR, "benchmarks", "{sample}", "spliser_process.tsv")
     params:
-        output_prefix = lambda wc: os.path.join(SSU_OUTPUT_DIR, wc.sample, wc.sample),
+        output_prefix = lambda wc: os.path.join(SSU_OUTPUT_DIR, "spliser", wc.sample, wc.sample),
         chroms        = " ".join(SSU_CHROMS),
-        output_dir    = lambda wc: os.path.join(SSU_OUTPUT_DIR, wc.sample),
+        output_dir    = lambda wc: os.path.join(SSU_OUTPUT_DIR, "spliser", wc.sample),
     conda:
         "spliser"
     shell:
@@ -80,26 +79,24 @@ rule spliser_process:
             -s rf
         """
 
-
-rule compare_spliser_ssu:
-    """Join SpliSER SSE against junction-based SSU estimates."""
+rule merge_benchmarks:
+    """Concatenate per-sample benchmark TSVs into one parquet for comparison."""
     input:
-        spliser = os.path.join(SSU_OUTPUT_DIR, "{sample}", "{sample}.SpliSER.tsv"),
-        ssu     = os.path.join(SSU_OUTPUT_DIR, "{sample}", "ssu_comparison.parquet"),
-        bed     = SSU_BED,
+        expand(
+            os.path.join(SSU_OUTPUT_DIR, "benchmarks", "{sample}", "{tool}.tsv"),
+            sample=SSU_BENCHMARK_SAMPLES,
+            tool=["compute_ssu", "spliser_process"],
+        ),
     output:
-        parquet = os.path.join(SSU_OUTPUT_DIR, "{sample}", "spliser_comparison.parquet"),
-        pdf     = os.path.join(SSU_OUTPUT_DIR, "{sample}", "spliser_vs_ssu_scatterplot.pdf"),
-    params:
-        script     = "src/scripts/compare_spliser_ssu.py",
-        output_dir = lambda wc: os.path.join(SSU_OUTPUT_DIR, wc.sample),
-    conda:
-        "spliser"
-    shell:
-        """
-        python {params.script} \
-            --spliser   {input.spliser} \
-            --ssu       {input.ssu} \
-            --bed       {input.bed} \
-            --output-dir {params.output_dir}
-        """
+        parquet = os.path.join(SSU_OUTPUT_DIR, "benchmarks", "benchmarks.parquet"),
+    run:
+        dfs = []
+        for f in input:
+            parts = f.split(os.sep)
+            sample = parts[-2]
+            tool = os.path.splitext(parts[-1])[0]
+            df = pd.read_csv(f, sep="\t")
+            df["sample"] = sample
+            df["tool"] = tool
+            dfs.append(df)
+        pd.concat(dfs, ignore_index=True).to_parquet(output.parquet, index=False)

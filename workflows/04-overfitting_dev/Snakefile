@@ -203,9 +203,9 @@ rule overfit_dev:
     threads: 20
     resources:
         runtime = int(4*60),  # hours in minutes
-        gres = "gpu:1",
-        partition = "acc_ehpc",
-        qos = "acc_ehpc"
+        memory = 42,
+        gres = "gpu:7g.80gb:1",
+        partition = "gpu"
     conda:
         "alphagenome_pytorch"
     retries: 1
