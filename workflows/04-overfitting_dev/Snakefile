@@ -58,8 +58,8 @@ _JPS_OPTIONS = [
     ("predicted", "predicted"),
 ]
 _MODES = [
-   #("frozen", "linear-probe"),
-   ("lora",   "lora"),
+   ("frozen", "linear-probe"),
+   #("lora",   "lora"),
 ]
 
 _DEBUG_SJ_RUNS = {}
@@ -187,7 +187,7 @@ rule overfit_dev:
         lr                          = 1e-3,
         weight_decay                = 0,
         warmup_steps                = 0,
-        epochs                      = 10,
+        epochs                      = 50,
         batch_size                  = 1,
         gradient_accumulation_steps = 8,
         track_means_samples         = config["finetuning"]["alphagenome"]["sf3b1mut"]["track_means_samples"],
