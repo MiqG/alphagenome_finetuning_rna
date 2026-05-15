@@ -178,6 +178,7 @@ for _rope_cfg, _rope in _SJ_ROPE_OPTIONS:
                 "junction_position_source": _src,
                 "junction_head_init":       _jinit,
                 "dtype":                    "float32",
+                "lr":                       1e-4,
             }
 
 def _add_dtype_variants(runs):
@@ -193,10 +194,10 @@ _DEBUG_SJ_RUNS = _add_dtype_variants(_DEBUG_SJ_RUNS)
 _FIX_SJ_RUNS   = _add_dtype_variants(_FIX_SJ_RUNS)
 
 ALL_RUNS = {}
-ALL_RUNS.update(_ORIGINAL_RUNS)
-ALL_RUNS.update(_DEBUG_SS_RUNS)
-ALL_RUNS.update(_DEBUG_SJ_RUNS)
-ALL_RUNS.update(_FIX_SJ_RUNS)
+# ALL_RUNS.update(_ORIGINAL_RUNS)
+# ALL_RUNS.update(_DEBUG_SS_RUNS)
+# ALL_RUNS.update(_DEBUG_SJ_RUNS)
+# ALL_RUNS.update(_FIX_SJ_RUNS)
 ALL_RUNS.update(_SPARSE_SJ_RUNS)
 
 _GROUP_RUNS = {
@@ -296,11 +297,11 @@ rule all:
             run_name=list(ALL_RUNS.keys()),
         ),
         os.path.join(OUTPUT_DIR, "summary", "epoch_logs.parquet"),
-        expand(
-            os.path.join(OUTPUT_DIR, "{density}", "{run_name}", "rna_seq.npz"),
-            density=DENSITIES,
-            run_name=RUN_NAMES_OI,
-        ),
+        # expand(
+        #     os.path.join(OUTPUT_DIR, "{density}", "{run_name}", "rna_seq.npz"),
+        #     density=DENSITIES,
+        #     run_name=RUN_NAMES_OI,
+        # ),
 
 
 
