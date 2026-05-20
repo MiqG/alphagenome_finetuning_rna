@@ -48,23 +48,26 @@ _PRETRINIT_HEAD = "rna_seq:119|390|119|390,splice_usage:139|506|139|506,splice_j
 
 # 2 init strategies x 2 trunk modes (frozen, lora)
 _SJ_INITS = [
-    ("randinit",  _RANDINIT_HEAD),
+    #("randinit",  _RANDINIT_HEAD),
     ("pretrinit", _PRETRINIT_HEAD),
 ]
 _SJ_LOSSES = [
-    ("origloss", False),
+    ("origloss",   "original"),
+    ("newloss",    "normalized"),
+    ("sparseloss", "sparse"),
 ]
 _JPS_OPTIONS = [
+    ("annotated", "annotated"),
     ("predicted", "predicted"),
 ]
 _MODES = [
-   ("frozen", "linear-probe"),
-   #("lora",   "lora"),
+   #("frozen", "linear-probe"),
+   ("lora",   "lora"),
 ]
 
 _DEBUG_SJ_RUNS = {}
 for _init, _head in _SJ_INITS:
-    for _loss, _new_loss in _SJ_LOSSES:
+    for _loss, _junction_loss in _SJ_LOSSES:
         for _jps_suffix, _jps in _JPS_OPTIONS:
             for _mode_suffix, _mode in _MODES:
                 _key = "debug_splice_junctions__{}__{}__{}__{}" .format(
@@ -75,7 +78,7 @@ for _init, _head in _SJ_INITS:
                     "pretrained_head":          _head,
                     "use_gtf":                  False,
                     "rope":                     "truncated",
-                    "new_junction_loss":        _new_loss,
+                    "junction_loss":            _junction_loss,
                     "mode":                     _mode,
                     "junction_position_source": _jps,
                 }
@@ -113,9 +116,7 @@ def _rope_arg(wildcards):
 
 
 def _new_loss_arg(wildcards):
-    if ALL_RUNS[wildcards.run_name]["new_junction_loss"]:
-        return "--junction-loss normalized"
-    return "--junction-loss original"
+    return "--junction-loss {}".format(ALL_RUNS[wildcards.run_name]["junction_loss"])
 
 
 def _junction_position_source_arg(wildcards):
@@ -147,7 +148,7 @@ def _gres(wildcards):
 rule all:
     input:
         expand(
-            os.path.join(OUTPUT_DIR, "{run_name}", "best_model.pth"),
+            os.path.join(OUTPUT_DIR, "{run_name}", "checkpoint_epoch50.pth"),
             run_name=list(ALL_RUNS.keys()),
         ),
         os.path.join(OUTPUT_DIR, "summary", "epoch_logs.parquet"),
@@ -178,7 +179,7 @@ rule overfit_dev:
             for sample in SAMPLES
         ],
     output:
-        checkpoint = os.path.join(OUTPUT_DIR, "{run_name}", "best_model.pth"),
+        checkpoint = os.path.join(OUTPUT_DIR, "{run_name}", "checkpoint_epoch50.pth"),
     params:
         num_gpus                    = 1,
         modality_bigwig             = config["finetuning"]["alphagenome"]["sf3b1mut"]["modality_bigwig"],
@@ -202,10 +203,10 @@ rule overfit_dev:
         junction_position_source_arg     = _junction_position_source_arg,
     threads: 10
     resources:
+        memory = 42, # GB
         runtime = int(4*60),  # hours in minutes
-        memory = 64,
-        gres = "gpu:7g.80gb:1",
-        partition = "gpu"
+        gres      = _gres,
+        partition = "gpu",
     conda:
         "alphagenome_pytorch"
     retries: 1
@@ -268,12 +269,17 @@ rule combine_epoch_logs:
         )
     input:
         models = lambda wildcards: expand(
-            os.path.join(OUTPUT_DIR, "{run_name}", "best_model.pth"),
+            os.path.join(OUTPUT_DIR, "{run_name}", "checkpoint_epoch50.pth"),
             run_name=list(ALL_RUNS.keys()),
         )
     output:
         combined = os.path.join(OUTPUT_DIR, "summary", "epoch_logs.parquet")
     threads: 1
+    resources:
+        memory = 2,
+        runtime = int(0.1*60),  # hours in minutes
+        gres = "none",
+        partition = "genoa64"
     run:
         import pandas as pd
 
