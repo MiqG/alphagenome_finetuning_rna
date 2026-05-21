@@ -7,6 +7,7 @@ configfile: "config/config.yaml"
 # Global paths
 TMP_ROOT = os.path.join(os.path.expanduser("~/scratch"))
 SUPPORT_DIR = "support"
+SCRIPTS_DIR = "src/scripts"
 
 # Global variables
 ALPHAGENOME_FOLDS = config["variables"]["ALPHAGENOME_FOLDS"]
@@ -45,6 +46,10 @@ rule all:
         ),
 
         # SSU comparison: custom compute_ssu vs SpliSER, with resource benchmarks
+        expand(
+            os.path.join(SSU_OUTPUT_DIR, "junctions", "{sample}.starlike.SJ.out.tab"),
+            sample=SSU_BENCHMARK_SAMPLES,
+        ),
         expand(
             os.path.join(SSU_OUTPUT_DIR, "custom", "{sample}", "paper_pass.ssu.parquet"),
             sample=SSU_BENCHMARK_SAMPLES,

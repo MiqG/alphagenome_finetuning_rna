@@ -20,6 +20,38 @@ def _junctions_path(sample):
         "paper_pass.SJ.out.tab",
     )
 
+rule get_junctions:
+    """Extract splice junctions from BAM in STAR SJ.out.tab format via regtools."""
+    input:
+        bam       = os.path.join(DATA_DIR,"STAR","{sample}","paper_pass.Aligned.sortedByCoord.out.filtered.bam"),
+        bam_bai   = os.path.join(DATA_DIR,"STAR","{sample}","paper_pass.Aligned.sortedByCoord.out.filtered.bam.bai"),
+    output:
+        sj = os.path.join(SSU_OUTPUT_DIR, "junctions", "{sample}.starlike.SJ.out.tab"),
+    benchmark:
+        os.path.join(SSU_OUTPUT_DIR, "benchmarks", "{sample}", "get_junctions.tsv")
+    params:
+        script = os.path.join(SCRIPTS_DIR, "get_star_junctions.py"),
+        chroms = " ".join(SSU_CHROMS),
+    threads: 2  # unique + total regtools passes run in parallel
+    resources:
+        gres      = "none",
+        partition = "genoa64",
+        runtime   = 2*60,
+        memory    = 8
+    conda:
+        "alphagenome_finetuning_rna"
+    shell:
+        """
+        set -eo pipefail
+
+        python {params.script} \
+            --bam {input.bam} \
+            --output {output.sj} \
+            --chroms {params.chroms}
+
+        echo "Done!"
+        """
+
 rule compute_ssu_benchmark:
     input:
         junctions = os.path.join(DATA_DIR,"STAR","{sample}","paper_pass.SJ.out.tab"),
