@@ -23,8 +23,8 @@ def _junctions_path(sample):
 rule get_junctions:
     """Extract splice junctions from BAM in STAR SJ.out.tab format via regtools."""
     input:
-        bam       = os.path.join(DATA_DIR,"STAR","{sample}","paper_pass.Aligned.sortedByCoord.out.filtered.bam"),
-        bam_bai   = os.path.join(DATA_DIR,"STAR","{sample}","paper_pass.Aligned.sortedByCoord.out.filtered.bam.bai"),
+        bam       = os.path.join(DATA_DIR,"STAR","{sample}","paper_pass.Aligned.sortedByCoord.out.bam"),
+        bam_bai   = os.path.join(DATA_DIR,"STAR","{sample}","paper_pass.Aligned.sortedByCoord.out.bam.bai"),
     output:
         sj = os.path.join(SSU_OUTPUT_DIR, "junctions", "{sample}.starlike.SJ.out.tab"),
     benchmark:
