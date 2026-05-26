@@ -58,15 +58,6 @@ rule download_fastq:
         """
 
 rule star_paper_pass:
-    """Single-pass STAR alignment replicating the AlphaGenome paper settings.
-
-    Differences vs our two-pass pipeline:
-    - Single pass (no pre-collected junctions)
-    - --outSAMstrandField intronMotif  (strand from splice dinucleotide, as in paper)
-    - --outSAMunmapped Within
-    - No --outFilterType BySJout
-    - No --quantMode
-    """
     input:
         download_done = [os.path.join(DATA_DIR,"fastqs",".done","{sample}_{end}").format(end=end, sample="{sample}") for end in ENDS],
         genome_dir = config["gencode"]["paths"]["star_index"],
