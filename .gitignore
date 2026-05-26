@@ -1,5 +1,6 @@
 *-workspace
 .claude
+src/genomicsxai.github.io
 src/alphagenome-pytorch
 scratch/*
 support/private/*
