@@ -32,32 +32,11 @@ alphagenome_pytorch:
   paths:
     weights: "data/raw/articles/Avsec2026/alphagenome_pytorch/fold-1/model_fold_1.safetensors"
 
-borzoi:
-  baskerville_path: "src/baskerville"
-  num_reps: 4
-  pretrained_trunks:
-    - "data/raw/borzoi/pretrain_trunks/trunk_r0.h5"
-    - "data/raw/borzoi/pretrain_trunks/trunk_r1.h5"
-    - "data/raw/borzoi/pretrain_trunks/trunk_r2.h5"
-    - "data/raw/borzoi/pretrain_trunks/trunk_r3.h5"
-  support:
-    blacklist: "data/raw/borzoi/hg38/blacklist_hg38_all.bed"
-    sequences_bed: "data/raw/borzoi/trainsplit/sequences.bed"
-    sequences_bed_url: "https://github.com/calico/borzoi/raw/5c9358222b5026abb733ed5fb84f3f6c77239b37/data/sequences_human.bed.gz"
-    
 finetuning:
-  borzoi:
-    sf3b1mut:
-      data_dir: "data/prep/borzoi/sf3b1mut"
-      output_dir: "results/finetuning/borzoi/sf3b1mut"
-      params_json: "support/borzoi/params_lora.json"
-      folds: 8
-      clip: 768
-      clip_soft: 384
-      scale: 0.005  # 1/(fragment_length ~200bp) for raw coverage bigwigs
   alphagenome:
     finetune_script: "src/alphagenome-pytorch/scripts/finetune.py"
     convert_folds_script: "src/alphagenome-pytorch/scripts/convert_borzoi_folds.py"
+    sequences_bed_url: "https://github.com/calico/borzoi/raw/5c9358222b5026abb733ed5fb84f3f6c77239b37/data/sequences_human.bed.gz"
     sequences_bed_gz: "data/prep/finetuning/sequences_human.bed.gz"
     folds_dir: "data/prep/finetuning/alphagenome"
     sf3b1mut:
@@ -82,13 +61,6 @@ preprocessing:
     single:
       output_dir: "data/prep/overfitting/single"
       densities: ["high", "medium", "low"]
-    dev:
-      output_dir: "data/prep/overfitting/dev"
-      n_train_top: 120
-      n_train_random: 50
-      n_val_top: 20
-      n_val_random: 10
-      seed: 42
 
 examples:
   alphagenome:

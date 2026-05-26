@@ -3,7 +3,7 @@ rule alphagenome_download_sequences_bed:
     output:
         sequences_bed_gz = config["finetuning"]["alphagenome"]["sequences_bed_gz"],
     params:
-        url = config["borzoi"]["support"]["sequences_bed_url"],
+        url = config["finetuning"]["alphagenome"]["sequences_bed_url"],
     threads: 1
     resources:
         gres = "none",
