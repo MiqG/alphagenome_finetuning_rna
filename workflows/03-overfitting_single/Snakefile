@@ -6,6 +6,7 @@ Each interval is overfitted independently for 1000 epochs (constant LR, linear-p
 using paper_pass bigwigs and junction files from the 2 preprocessing samples.
 
 Three experiment groups, each run on the medium density interval:
+Three experiment groups, each run on the medium density interval:
 
   original            — baseline (randinit, no segmented loss, no GTF):
                         1 modality-weight config x 2 dtypes
@@ -14,6 +15,8 @@ Three experiment groups, each run on the medium density interval:
                         6 configs x 2 dtypes
 
   debug_splice_junctions — ablate rope x loss x junction_source x head_init:
+                        3 losses (original, normalized, sparse) x 2 rope x 2 source x 2 init
+                        = 24 configs x 2 dtypes
                         3 losses (original, normalized, sparse) x 2 rope x 2 source x 2 init
                         = 24 configs x 2 dtypes
 
@@ -33,16 +36,16 @@ OUTPUT_DIR      = "results/finetuning/alphagenome_pytorch/overfitting/single"
 SAMPLES        = config["preprocessing"]["overfitting"]["samples"]
 DENSITIES      = ["medium"]
 DTYPES         = ["bfloat16"] #["bfloat16", "float32"]
+DTYPES         = ["bfloat16"] #["bfloat16", "float32"]
 BIGWIG_STRANDS = ["forward", "reverse"]
-RUN_NAMES_OI = [
-    "debug_splice_junctions__truncrope__origloss__annotated__pretrinit__bfloat16"
-]
+RUN_NAMES_OI = []
 
 # ---------------------------------------------------------------------------
 # Run configuration
 # Each entry: modality_weights, init_strategy, use_gtf, loss_partitions, rope
 # ---------------------------------------------------------------------------
 
+_ALL_MW = "rna_seq:1.0,splice_site:1.0,splice_usage:1.0,splice_junctions:1.0"
 _ALL_MW = "rna_seq:1.0,splice_site:1.0,splice_usage:1.0,splice_junctions:1.0"
 _ORIGINAL_RUNS = {
     "original__all": {
@@ -82,9 +85,14 @@ _SJ_ROPE_OPTIONS   = [("origrope",  "original"),   ("truncrope",  "truncated")]
 _SJ_LOSS_OPTIONS   = [("origloss",  "original"),   ("newloss",    "normalized"), ("sparseloss", "sparse")]
 _SJ_SOURCE_OPTIONS = [("annotated", "annotated"),  ("predicted",  "predicted")]
 _SJ_JINIT_OPTIONS  = [("randinit",  "normal"),     ("pretrinit",  "pretrained")]
+_SJ_ROPE_OPTIONS   = [("origrope",  "original"),   ("truncrope",  "truncated")]
+_SJ_LOSS_OPTIONS   = [("origloss",  "original"),   ("newloss",    "normalized"), ("sparseloss", "sparse")]
+_SJ_SOURCE_OPTIONS = [("annotated", "annotated"),  ("predicted",  "predicted")]
+_SJ_JINIT_OPTIONS  = [("randinit",  "normal"),     ("pretrinit",  "pretrained")]
 
 _DEBUG_SJ_RUNS = {}
 for _rope_cfg, _rope in _SJ_ROPE_OPTIONS:
+    for _loss_suffix, _loss in _SJ_LOSS_OPTIONS:
     for _loss_suffix, _loss in _SJ_LOSS_OPTIONS:
         for _src_suffix, _src in _SJ_SOURCE_OPTIONS:
             for _jinit_suffix, _jinit in _SJ_JINIT_OPTIONS:
@@ -96,6 +104,7 @@ for _rope_cfg, _rope in _SJ_ROPE_OPTIONS:
                     "use_gtf":                  False,
                     "num_segments":             None,
                     "rope":                     _rope,
+                    "junction_loss":            _loss,
                     "junction_loss":            _loss,
                     "junction_position_source": _src,
                     "junction_head_init":       _jinit,
@@ -114,6 +123,10 @@ _DEBUG_SS_RUNS = _add_dtype_variants(_DEBUG_SS_RUNS)
 _DEBUG_SJ_RUNS = _add_dtype_variants(_DEBUG_SJ_RUNS)
 
 ALL_RUNS = {}
+ALL_RUNS.update(_ORIGINAL_RUNS)
+ALL_RUNS.update(_DEBUG_SS_RUNS)
+ALL_RUNS.update(_DEBUG_SJ_RUNS)
+#print(list(ALL_RUNS.keys()))
 ALL_RUNS.update(_ORIGINAL_RUNS)
 ALL_RUNS.update(_DEBUG_SS_RUNS)
 ALL_RUNS.update(_DEBUG_SJ_RUNS)
@@ -173,6 +186,8 @@ def _rope_arg(wildcards):
 
 
 def _new_loss_arg(wildcards):
+    jl = ALL_RUNS[wildcards.run_name].get("junction_loss", "original")
+    return "--junction-loss {}".format(jl)
     jl = ALL_RUNS[wildcards.run_name].get("junction_loss", "original")
     return "--junction-loss {}".format(jl)
 
@@ -261,6 +276,7 @@ rule overfit_single:
         weight_decay                = 0,
         warmup_steps                = 0,
         epochs                      = 500,
+        epochs                      = 500,
         save_every                  = 250,
         batch_size                  = 1,
         gradient_accumulation_steps = 1,
@@ -284,6 +300,7 @@ rule overfit_single:
         qos = "acc_ehpc"
     conda:
         "alphagenome_pytorch"
+    retries: 1
     retries: 1
     shell:
         """

@@ -69,11 +69,11 @@ finetuning:
       overlap_highres: 1024
       lr: 1e-4
       warmup_steps: 200
-      epochs: 2
+      epochs: 5
       batch_size: 1
       gradient_accumulation_steps: 16
-      track_means_samples: 500  # intervals to sample for track mean estimation (subset for speed)
-      save_every_steps: 500
+      track_means_samples: 1000  # deterministic every-Nth subset; sufficient for mean estimation
+      save_every_steps: 250
 
 preprocessing:
   overfitting:
