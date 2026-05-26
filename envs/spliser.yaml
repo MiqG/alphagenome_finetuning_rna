@@ -13,4 +13,4 @@ dependencies:
   - pip
   - pip:
       - HTSeq>=2.0
-      - git+file:///users/diasfrazer/manglada/repositories/SpliSER@speedups#egg=spliser
+      - git+https://github.com/CraigIDent/SpliSER@speedups#egg=spliser

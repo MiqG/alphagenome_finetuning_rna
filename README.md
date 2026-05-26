@@ -53,7 +53,7 @@
     ```bash
     # bsc
     
-    sbatch src/scripts/submit_snakemake_slurm.sh 'snakemake --cluster "sbatch --account=ehpc708 --cpus-per-task={threads} --time={resources.runtime} --partition={resources.partition} --qos={resources.qos} --gres={resources.gres} --parsable" --cluster-status src/scripts/status-sacct.sh --jobs 365 --use-conda -s workflows/03-overfitting_single/Snakefile --latency-wait 60 --rerun-incomplete --keep-going'
+    sbatch src/scripts/submit_snakemake_slurm.sh 'snakemake --cluster "sbatch --account=<YOUR_BSC_ACCOUNT> --cpus-per-task={threads} --time={resources.runtime} --partition={resources.partition} --qos={resources.qos} --gres={resources.gres} --parsable" --cluster-status src/scripts/status-sacct.sh --jobs 365 --use-conda -s workflows/03-overfitting_single/Snakefile --latency-wait 60 --rerun-incomplete --keep-going'
     ```
 
    Overfits AlphaGenome for 50 epochs (constant LR, no warmup, linear-probe mode) on each of
@@ -110,7 +110,7 @@
     ```bash
     # bsc
     
-    sbatch src/scripts/submit_snakemake_slurm.sh 'snakemake --cluster "sbatch --account=ehpc708 --cpus-per-task={threads} --time={resources.runtime} --partition={resources.partition} --qos={resources.qos} --gres={resources.gres} --parsable" --cluster-status src/scripts/status-sacct.sh --jobs 365 --use-conda -s workflows/04-overfitting_dev/Snakefile --latency-wait 60 --rerun-incomplete --keep-going --rerun-triggers mtime'
+    sbatch src/scripts/submit_snakemake_slurm.sh 'snakemake --cluster "sbatch --account=<YOUR_BSC_ACCOUNT> --cpus-per-task={threads} --time={resources.runtime} --partition={resources.partition} --qos={resources.qos} --gres={resources.gres} --parsable" --cluster-status src/scripts/status-sacct.sh --jobs 365 --use-conda -s workflows/04-overfitting_dev/Snakefile --latency-wait 60 --rerun-incomplete --keep-going --rerun-triggers mtime'
     ```
    
    Overfits AlphaGenome for 50 epochs (constant LR, no warmup, linear-probe mode) on the dev
@@ -138,7 +138,7 @@
    ```bash
    # bsc
 
-   sbatch src/scripts/submit_snakemake_slurm.sh 'snakemake --cluster "sbatch --account=ehpc708 --cpus-per-task={threads} --time={resources.runtime} --partition={resources.partition} --qos={resources.qos} --gres={resources.gres} --parsable" --cluster-status src/scripts/status-sacct.sh --jobs 365 --use-conda -s workflows/05-full_finetuning/Snakefile --latency-wait 60 --rerun-incomplete --keep-going --rerun-triggers mtime'
+   sbatch src/scripts/submit_snakemake_slurm.sh 'snakemake --cluster "sbatch --account=<YOUR_BSC_ACCOUNT> --cpus-per-task={threads} --time={resources.runtime} --partition={resources.partition} --qos={resources.qos} --gres={resources.gres} --parsable" --cluster-status src/scripts/status-sacct.sh --jobs 365 --use-conda -s workflows/05-full_finetuning/Snakefile --latency-wait 60 --rerun-incomplete --keep-going --rerun-triggers mtime'
    ```
 
    Fine-tunes AlphaGenome on the full FOLD_1 train/val split (41,699 train + 6,323 val intervals)
