@@ -58,6 +58,7 @@ _SJ_LOSSES = [
 ]
 _JPS_OPTIONS = [
     ("annotated", "annotated"),
+    ("annotated", "annotated"),
     ("predicted", "predicted"),
 ]
 _MODES = [
@@ -77,6 +78,7 @@ _GPU_OPTIONS = [
 
 _DEBUG_SJ_RUNS = {}
 for _init, _head in _SJ_INITS:
+    for _loss, _junction_loss in _SJ_LOSSES:
     for _loss, _junction_loss in _SJ_LOSSES:
         for _jps_suffix, _jps in _JPS_OPTIONS:
             for _mode_suffix, _mode in _MODES:
@@ -139,6 +141,7 @@ def _rope_arg(wildcards):
 
 
 def _new_loss_arg(wildcards):
+    return "--junction-loss {}".format(ALL_RUNS[wildcards.run_name]["junction_loss"])
     return "--junction-loss {}".format(ALL_RUNS[wildcards.run_name]["junction_loss"])
 
 
@@ -228,6 +231,7 @@ rule overfit_dev:
     benchmark:
         os.path.join(OUTPUT_DIR, "benchmarks", "{run_name}", "overfit_dev.tsv")
     output:
+        checkpoint = os.path.join(OUTPUT_DIR, "{run_name}", "checkpoint_epoch50.pth"),
         checkpoint = os.path.join(OUTPUT_DIR, "{run_name}", "checkpoint_epoch50.pth"),
     params:
         num_gpus                    = _num_gpus,

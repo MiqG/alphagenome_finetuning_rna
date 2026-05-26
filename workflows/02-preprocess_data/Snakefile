@@ -44,7 +44,7 @@ _N_BY_SPLIT = {
 }
 
 
-_FWD_OUTPUTS = ["rna_seq.npz", "splice_classification.npz", "splice_usage.npz", "splice_junctions.npz", "metadata.json"]
+_FWD_OUTPUTS = ["rna_seq.npz", "splice_classification.npz", "splice_usage.npz", "splice_junctions.npz", "splice_junctions_annotated.npz", "metadata.json"]
 
 rule all:
     input:
@@ -133,15 +133,17 @@ rule pretrained_forward_pass_single:
     wildcard_constraints:
         density = "high|medium|low",
     input:
-        bed     = os.path.join(SINGLE_DIR, "{density}.bed"),
-        weights = WEIGHTS,
-        genome  = GENOME,
+        bed            = os.path.join(SINGLE_DIR, "{density}.bed"),
+        weights        = WEIGHTS,
+        genome         = GENOME,
+        star_junctions = STAR_JUNCTIONS,
     output:
-        rna_seq        = os.path.join(SINGLE_DIR, "{density}", "rna_seq.npz"),
-        classification = os.path.join(SINGLE_DIR, "{density}", "splice_classification.npz"),
-        usage          = os.path.join(SINGLE_DIR, "{density}", "splice_usage.npz"),
-        junctions      = os.path.join(SINGLE_DIR, "{density}", "splice_junctions.npz"),
-        metadata       = os.path.join(SINGLE_DIR, "{density}", "metadata.json"),
+        rna_seq             = os.path.join(SINGLE_DIR, "{density}", "rna_seq.npz"),
+        classification      = os.path.join(SINGLE_DIR, "{density}", "splice_classification.npz"),
+        usage               = os.path.join(SINGLE_DIR, "{density}", "splice_usage.npz"),
+        junctions           = os.path.join(SINGLE_DIR, "{density}", "splice_junctions.npz"),
+        junctions_annotated = os.path.join(SINGLE_DIR, "{density}", "splice_junctions_annotated.npz"),
+        metadata            = os.path.join(SINGLE_DIR, "{density}", "metadata.json"),
     params:
         script  = "src/scripts/run_pretrained_forward_pass.py",
         out_dir = os.path.join(SINGLE_DIR, "{density}"),
@@ -155,5 +157,6 @@ rule pretrained_forward_pass_single:
             --bed {input.bed} \
             --genome {input.genome} \
             --sequence-length {params.seq_len} \
-            --output-dir {params.out_dir}
+            --output-dir {params.out_dir} \
+            --star-junctions {input.star_junctions}
         """
