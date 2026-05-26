@@ -1,156 +1,104 @@
 # Fine-tuning splicing heads for AlphaGenome
 
-## workflows
-1. obtain data (`workflows/01-obtain_data/Snakefile`)
+[AlphaGenome](https://deepmind.google/discover/blog/alphagenome-a-foundation-model-for-genome-biology/) is a sequence-to-function foundation model for genome biology. While community implementations such as [alphagenome-pytorch](https://github.com/genomicsxai/alphagenome-pytorch) support fine-tuning on RNA-seq coverage tracks, extending the model to splicing modalities (splice site classification, splice site usage, and splice junction counts) requires additional preprocessing, data loading, and validation work.
 
-   ```bash
-   snakemake -s workflows/01-obtain_data/Snakefile --use-conda -j <cores>
-   ```
-   - genome sequence and annotations from GENCODE
-      - download genome sequence
-      - download genome annotation
+This repository contains the full Snakemake pipeline used to develop and validate that extension, using two RNA-seq samples from SF3B1-mutant MEC1 cells ([López-Oreja 2023](https://doi.org/10.26508/lsa.202301955)) as a case study. It covers everything from raw FASTQ download and alignment to single-interval overfitting experiments and full fine-tuning. The development process, including the bugs we found and fixed along the way, is described in our [blog post]().
 
-   - RNA-seq (SF3B1-mutant MEC1, ENA)
-      - download fastq
-      - align (STAR two-pass)
-         - splice junctions
-         - bam files
-      - process bam files
-         - splice site usage (contain strand information)
-         - coverage bigwig (one if unstranded two if stranded)
-      - comparison SSU (`workflows/01-obtain_data/rules/comparison_ssu.smk`)
-         - compare that preprocessing is equivalent with SpliSER
-         - not only output values, but also time to process every single sample
+## Requirements
 
-   - models
-      - download model weights (AlphaGenome-PyTorch)
-      - download and prepare genome interval folds (Borzoi hg38 sequences.bed)
+- [Snakemake](https://snakemake.readthedocs.io) with conda integration (`--use-conda`)
+- SLURM (optional, for cluster execution)
+- 4 GPUs (for multi-GPU fine-tuning steps): all linear probing runs have been shown to run in GPUs with 46GB of memory, however, lora runs required at least 80GB.
 
-2. preprocess data (`workflows/02-preprocess_data/Snakefile`)
+All software dependencies are managed per-workflow via conda environments defined in `envs/`.
 
-   ```bash
-   snakemake -s workflows/02-preprocess_data/Snakefile --use-conda -j <cores>
-   ```
-   - single intervals to overfit: select one interval per density tier (high / medium / low) from FOLD_1 train.bed, ranked by total uniquely-mapped junction reads across samples
-      - output: `data/prep/overfitting/single/{high,medium,low}.bed`
-   - dev dataset intervals: select top-N + random intervals from FOLD_1 train/valid.bed
-      - train: 120 top + 50 random
-      - valid: 20 top + 10 random
-      - output: `data/prep/overfitting/dev/{train,valid}.bed`
+## Workflows
 
-3. overfitting single (`workflows/03-overfitting_single/Snakefile`)
+### 1. Obtain data (`workflows/01-obtain_data/Snakefile`)
 
-    ```bash
-    snakemake -s workflows/03-overfitting_single/Snakefile --use-conda -j <cores>
-    ```
+```bash
+snakemake -s workflows/01-obtain_data/Snakefile --use-conda -j <cores>
+```
 
-    ```bash
-    # crg
-    
-    sbatch src/scripts/submit_snakemake_slurm.sh 'snakemake --cluster "sbatch --cpus-per-task={threads} --mem={resources.memory}G --time={resources.runtime} --partition={resources.partition} --qos=normal --gres={resources.gres} --parsable" --cluster-status src/scripts/status-sacct.sh --jobs 30 --use-conda -s workflows/03-overfitting_single/Snakefile --latency-wait 60 --keep-going --rerun-incomplete --rerun-triggers mtime'
-    ```
+Downloads and preprocesses all inputs:
 
-    ```bash
-    # bsc
-    
-    sbatch src/scripts/submit_snakemake_slurm.sh 'snakemake --cluster "sbatch --account=<YOUR_BSC_ACCOUNT> --cpus-per-task={threads} --time={resources.runtime} --partition={resources.partition} --qos={resources.qos} --gres={resources.gres} --parsable" --cluster-status src/scripts/status-sacct.sh --jobs 365 --use-conda -s workflows/03-overfitting_single/Snakefile --latency-wait 60 --rerun-incomplete --keep-going'
-    ```
+- **Genome**: GRCh38 sequence and GENCODE v46 annotation; builds STAR index
+- **RNA-seq** (SF3B1-mutant MEC1, ENA): downloads paired-end FASTQs, aligns with STAR two-pass, and derives all four training tracks per sample:
+  - per-base coverage bigwigs (stranded)
+  - splice site usage (parquet, via `compute_ssu.py`)
+  - splice junction counts (TSV, via STAR or `get_star_junctions.py`)
+  - splice site classes (derived on the fly from splice site usage files during training)
+- **Model weights**: AlphaGenome-PyTorch from Hugging Face; Borzoi pretrained trunks and genome interval folds from GCS
+- **Validation** (`rules/comparison_ssu.smk`): confirms that `compute_ssu.py` and `get_star_junctions.py` match SpliSER and STAR output (Pearson r = 1 on chr1)
 
-   Overfits AlphaGenome for 50 epochs (constant LR, no warmup, linear-probe mode) on each of
-   the 3 single intervals (high / medium / low splice junction density) from `02-preprocess_data`.
-   All runs use `paper_pass` bigwigs and junction files from the 2 preprocessing samples
-   (SRR17111303, SRR17111311).
+### 2. Preprocess data (`workflows/02-preprocess_data/Snakefile`)
 
-   Three experiment groups:
+```bash
+snakemake -s workflows/02-preprocess_data/Snakefile --use-conda -j <cores>
+```
 
-   - **original** — baseline: randinit heads, no segmented loss, no GTF, original rope
-      - `all`: all 4 modalities contribute equally (weight 1.0)
-      - `rna_seq_only`, `splice_site_only`, `splice_usage_only`, `splice_junctions_only`:
-        one modality at weight 1.0, all others at 0.0
-      - store: train/val losses (total + per modality), correlations per epoch, time and memory;
-        for splice_site: auPRC against ground-truth categorical labels
-      - plot: loss curves (total + per modality), correlation curves — palette by density tier
+Selects genomic intervals for overfitting experiments from the Borzoi FOLD_1 splits:
 
-   - **debug_splice_sites** — ablate head init × segmented loss × GTF for splice-site training.
-     Six configurations (head_init × segmented_loss × gtf_variant):
-      1. randinit, no segmented loss, with GTF
-      2. randinit, segmented loss, with GTF
-      3. randinit, segmented loss, no GTF
-      4. pretrinit, segmented loss, no GTF
-      5. pretrinit, segmented loss, with GTF
-      6. pretrinit, no segmented loss, with GTF
-     Each config runs twice: `splice_site_only` (weight 1.0) and `all` (all modalities 1.0).
-      - store: same as original
-      - plot: loss curves, correlations, auPRC across configs
+- **Single intervals**: one interval per splice junction density tier (high / medium / low), ranked by total uniquely-mapped junction reads across samples. Output: `data/prep/overfitting/single/{high,medium,low}.bed`
+- **Dev dataset**: top-N + random intervals for a small train/val split (120+50 train, 20+10 val). Output: `data/prep/overfitting/dev/{train,valid}.bed`
 
-   - **debug_splice_junctions** — ablate rope initialization × GTF for junction training.
-     Four configurations (rope_variant × gtf_variant):
-      1. original rope, with GTF
-      2. original rope, no GTF
-      3. truncated rope, with GTF
-      4. truncated rope, no GTF
-     Each config runs twice: `junction_only` (weight 1.0) and `all` (all modalities 1.0).
-      - store: same as original
-      - plot: loss curves, junction correlations across configs
+### 3. Single-interval overfitting (`workflows/03-overfitting_single/Snakefile`)
 
-   Output: `results/finetuning/alphagenome_pytorch/overfitting/single/`
+```bash
+snakemake -s workflows/03-overfitting_single/Snakefile --use-conda -j <cores>
+```
 
-4. overfitting dev dataset (`workflows/04-overfitting_dev/Snakefile`)
+```bash
+# SLURM
+sbatch src/scripts/submit_snakemake_slurm.sh 'snakemake --cluster "sbatch --cpus-per-task={threads} --mem={resources.memory}G --time={resources.runtime} --partition={resources.partition} --qos=normal --gres={resources.gres} --parsable" --cluster-status src/scripts/status-sacct.sh --jobs 30 --use-conda -s workflows/03-overfitting_single/Snakefile --latency-wait 60 --keep-going --rerun-incomplete --rerun-triggers mtime'
+```
 
-   ```bash
-   snakemake -s workflows/04-overfitting_dev/Snakefile --use-conda -j <cores>
-   ```
+Overfits AlphaGenome for 500 epochs (constant LR, no warmup, frozen trunk, 1 GPU) on the medium splice junction density interval from step 2. Three experiment groups, all running with all 4 modalities jointly:
 
-    ```bash
-    # crg
+- **original**: baseline with randomly initialized heads, no GTF augmentation, original RoPE initialization (zeros).
+- **debug_splice_sites**: ablation of head initialization (random vs. pretrained), loss segmentation (none vs. 8 segments), and GTF augmentation for the splice site classification head. Six configurations.
+- **debug_splice_junctions**: 4-way factorial ablation of RoPE initialization (zeros vs. truncated normal), junction loss formulation (original, normalized, sparse), junction position source (annotated vs. predicted), and junction head initialization (random vs. pretrained). 24 configurations.
 
-    sbatch src/scripts/submit_snakemake_slurm.sh 'snakemake --cluster "sbatch --cpus-per-task={threads} --mem={resources.memory}G --time={resources.runtime} --partition={resources.partition} --qos=normal --gres={resources.gres} --parsable" --cluster-status src/scripts/status-sacct.sh --jobs 30 --use-conda -s workflows/04-overfitting_dev/Snakefile --latency-wait 60 --keep-going --rerun-incomplete --rerun-triggers mtime'
-    ```
-   
-    ```bash
-    # bsc
-    
-    sbatch src/scripts/submit_snakemake_slurm.sh 'snakemake --cluster "sbatch --account=<YOUR_BSC_ACCOUNT> --cpus-per-task={threads} --time={resources.runtime} --partition={resources.partition} --qos={resources.qos} --gres={resources.gres} --parsable" --cluster-status src/scripts/status-sacct.sh --jobs 365 --use-conda -s workflows/04-overfitting_dev/Snakefile --latency-wait 60 --rerun-incomplete --keep-going --rerun-triggers mtime'
-    ```
-   
-   Overfits AlphaGenome for 50 epochs (constant LR, no warmup, linear-probe mode) on the dev
-   dataset (train/val split) from `02-preprocess_data`. All runs use `paper_pass` bigwigs and
-   junction files from the 2 preprocessing samples (SRR17111303, SRR17111311).
+Output: `results/finetuning/alphagenome_pytorch/overfitting/single/`
 
-   One experiment group:
+### 4. Dev dataset overfitting (`workflows/04-overfitting_dev/Snakefile`)
 
-   - **debug_splice_junctions** — ablate junction loss formulation with truncated rope initialization.
-     Two configurations (loss_variant):
-      1. truncated rope, original junction loss (`truncrope_origloss`)
-      2. truncated rope, new junction loss (`truncrope_newloss`)
-     Each config runs twice: `junction_only` (weight 1.0) and `all` (all modalities 1.0).
-      - store: train/val losses (total + per modality), correlations per epoch
-      - plot: loss curves and junction correlations across configs along epochs
+```bash
+snakemake -s workflows/04-overfitting_dev/Snakefile --use-conda -j <cores>
+```
 
-   Output: `results/finetuning/alphagenome_pytorch/overfitting/dev/`
+```bash
+# SLURM
+sbatch src/scripts/submit_snakemake_slurm.sh 'snakemake --cluster "sbatch --cpus-per-task={threads} --mem={resources.memory}G --time={resources.runtime} --partition={resources.partition} --qos=normal --gres={resources.gres} --parsable" --cluster-status src/scripts/status-sacct.sh --jobs 30 --use-conda -s workflows/04-overfitting_dev/Snakefile --latency-wait 60 --keep-going --rerun-incomplete --rerun-triggers mtime'
+```
 
-5. full finetuning (`workflows/05-full_finetuning/Snakefile`)
+Overfits AlphaGenome for 50 epochs on the dev train/val split from step 2. One experiment group:
 
-   ```bash
-   snakemake -s workflows/05-full_finetuning/Snakefile --use-conda -j <cores>
-   ```
+- **debug_splice_junctions**: fixed to truncated RoPE initialization and ratio-normalized junction loss; ablates junction position source (annotated vs. predicted) and GPU parallelism strategy (single GPU, 4-GPU sequence parallel, 4-GPU DDP) with frozen trunk and randomly initialized heads. Effective batch size is 8 across all GPU configurations.
 
-   ```bash
-   # bsc
+Output: `results/finetuning/alphagenome_pytorch/overfitting/dev/`
 
-   sbatch src/scripts/submit_snakemake_slurm.sh 'snakemake --cluster "sbatch --account=<YOUR_BSC_ACCOUNT> --cpus-per-task={threads} --time={resources.runtime} --partition={resources.partition} --qos={resources.qos} --gres={resources.gres} --parsable" --cluster-status src/scripts/status-sacct.sh --jobs 365 --use-conda -s workflows/05-full_finetuning/Snakefile --latency-wait 60 --rerun-incomplete --keep-going --rerun-triggers mtime'
-   ```
+### 5. Full fine-tuning (`workflows/05-full_finetuning/Snakefile`)
 
-   Fine-tunes AlphaGenome on the full FOLD_1 train/val split (41,699 train + 6,323 val intervals)
-   using the best configuration identified from the overfitting experiments. All runs use
-   `paper_pass` bigwigs and junction files from the 2 preprocessing samples
-   (SRR17111303, SRR17111311).
+```bash
+snakemake -s workflows/05-full_finetuning/Snakefile --use-conda -j <cores>
+```
 
-   Single run:
+```bash
+# SLURM
+sbatch src/scripts/submit_snakemake_slurm.sh 'snakemake --cluster "sbatch --account=<YOUR_BSC_ACCOUNT> --cpus-per-task={threads} --time={resources.runtime} --partition={resources.partition} --qos={resources.qos} --gres={resources.gres} --parsable" --cluster-status src/scripts/status-sacct.sh --jobs 365 --use-conda -s workflows/05-full_finetuning/Snakefile --latency-wait 60 --rerun-incomplete --keep-going --rerun-triggers mtime'
+```
 
-   - **randinit, normalized junction loss, predicted junction positions, frozen trunk (linear-probe), DDP 4 GPUs**
-     - constant LR (1e-4), no warmup (linear-probe, no scheduling needed), 5 epochs, EBS 64
-     - `--resume auto` for fault tolerance across SLURM preemptions
-     - store: train/val losses (total + per modality), correlations per epoch
+Fine-tunes AlphaGenome on the full FOLD_1 train/val split (41,699 train + 6,323 val intervals) using the best configuration from the overfitting experiments: randomly initialized heads, ratio-normalized junction loss, predicted junction positions, frozen trunk, 4-GPU DDP, constant LR (1e-4), 5 epochs, effective batch size 64. Uses `--resume auto` for fault tolerance across SLURM preemptions.
 
-   Output: `results/finetuning/alphagenome_pytorch/full/`
+Output: `results/finetuning/alphagenome_pytorch/full/`
+
+## Citation
+
+If you use this repository, please cite our blog post (link to be added upon publication) and the original AlphaGenome paper:
+
+> Avsec, Ž. et al. Advancing regulatory variant effect prediction with AlphaGenome. *Nature*, 649 (2026). https://doi.org/10.1038/s41586-025-10014-0
+
+## License
+
+Apache 2.0 — see [LICENSE](LICENSE).
