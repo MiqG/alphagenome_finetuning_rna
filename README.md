@@ -110,7 +110,7 @@
     ```bash
     # bsc
     
-    sbatch src/scripts/submit_snakemake_slurm.sh 'snakemake --cluster "sbatch --account=ehpc708 --cpus-per-task={threads} --time={resources.runtime} --partition={resources.partition} --qos={resources.qos} --gres={resources.gres} --parsable" --cluster-status src/scripts/status-sacct.sh --jobs 365 --use-conda -s workflows/04-overfitting_dev/Snakefile --latency-wait 60 --rerun-incomplete --keep-going'
+    sbatch src/scripts/submit_snakemake_slurm.sh 'snakemake --cluster "sbatch --account=ehpc708 --cpus-per-task={threads} --time={resources.runtime} --partition={resources.partition} --qos={resources.qos} --gres={resources.gres} --parsable" --cluster-status src/scripts/status-sacct.sh --jobs 365 --use-conda -s workflows/04-overfitting_dev/Snakefile --latency-wait 60 --rerun-incomplete --keep-going --rerun-triggers mtime'
     ```
    
    Overfits AlphaGenome for 50 epochs (constant LR, no warmup, linear-probe mode) on the dev
@@ -129,8 +129,28 @@
 
    Output: `results/finetuning/alphagenome_pytorch/overfitting/dev/`
 
-5. sequence parallelization
+5. full finetuning (`workflows/05-full_finetuning/Snakefile`)
 
+   ```bash
+   snakemake -s workflows/05-full_finetuning/Snakefile --use-conda -j <cores>
+   ```
 
-      
+   ```bash
+   # bsc
 
+   sbatch src/scripts/submit_snakemake_slurm.sh 'snakemake --cluster "sbatch --account=ehpc708 --cpus-per-task={threads} --time={resources.runtime} --partition={resources.partition} --qos={resources.qos} --gres={resources.gres} --parsable" --cluster-status src/scripts/status-sacct.sh --jobs 365 --use-conda -s workflows/05-full_finetuning/Snakefile --latency-wait 60 --rerun-incomplete --keep-going --rerun-triggers mtime'
+   ```
+
+   Fine-tunes AlphaGenome on the full FOLD_1 train/val split (41,699 train + 6,323 val intervals)
+   using the best configuration identified from the overfitting experiments. All runs use
+   `paper_pass` bigwigs and junction files from the 2 preprocessing samples
+   (SRR17111303, SRR17111311).
+
+   Single run:
+
+   - **randinit, normalized junction loss, predicted junction positions, frozen trunk (linear-probe), DDP 4 GPUs**
+     - constant LR (1e-4), no warmup (linear-probe, no scheduling needed), 5 epochs, EBS 64
+     - `--resume auto` for fault tolerance across SLURM preemptions
+     - store: train/val losses (total + per modality), correlations per epoch
+
+   Output: `results/finetuning/alphagenome_pytorch/full/`
