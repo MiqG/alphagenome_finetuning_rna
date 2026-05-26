@@ -101,4 +101,4 @@ If you use this repository, please cite our blog post (link to be added upon pub
 
 ## License
 
-Apache 2.0 — see [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE).
