@@ -34,16 +34,16 @@ SF3B1_CFG = config["finetuning"]["alphagenome"]["sf3b1mut"]
 _NUM_GPUS = 4
 
 ALL_RUNS = {
-    "randinit__newloss__predicted__frozen__multigpu_ddp": {
-        "modality_weights":            "rna_seq:1.0,splice_site:1.0,splice_usage:1.0,splice_junctions:1.0",
-        "pretrained_head":             "rna_seq:NA,splice_usage:NA,splice_junctions:NA,splice_site:0",
-        "use_gtf":                     False,
-        "rope":                        "truncated",
-        "junction_loss":               "normalized",
-        "mode":                        "linear-probe",
-        "junction_position_source":    "predicted",
-        "gradient_accumulation_steps": SF3B1_CFG["gradient_accumulation_steps"],
-    },
+    # "randinit__newloss__predicted__frozen__multigpu_ddp": {
+    #     "modality_weights":            "rna_seq:1.0,splice_site:1.0,splice_usage:1.0,splice_junctions:1.0",
+    #     "pretrained_head":             "rna_seq:NA,splice_usage:NA,splice_junctions:NA,splice_site:0",
+    #     "use_gtf":                     False,
+    #     "rope":                        "truncated",
+    #     "junction_loss":               "normalized",
+    #     "mode":                        "linear-probe",
+    #     "junction_position_source":    "predicted",
+    #     "gradient_accumulation_steps": SF3B1_CFG["gradient_accumulation_steps"],
+    # },
     "randinit__newloss__annotated__frozen__multigpu_ddp": {
         "modality_weights":            "rna_seq:1.0,splice_site:1.0,splice_usage:1.0,splice_junctions:1.0",
         "pretrained_head":             "rna_seq:NA,splice_usage:NA,splice_junctions:NA,splice_site:0",
