@@ -124,7 +124,7 @@ def _gres(wildcards):
 # Rules
 # ---------------------------------------------------------------------------
 
-_EPOCHS = 10 #SF3B1_CFG["epochs"]
+_EPOCHS = 20 #SF3B1_CFG["epochs"]
 
 rule all:
     input:
