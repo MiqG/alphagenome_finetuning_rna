@@ -44,6 +44,16 @@ ALL_RUNS = {
         "junction_position_source":    "predicted",
         "gradient_accumulation_steps": SF3B1_CFG["gradient_accumulation_steps"],
     },
+    "randinit__newloss__annotated__frozen__multigpu_ddp": {
+        "modality_weights":            "rna_seq:1.0,splice_site:1.0,splice_usage:1.0,splice_junctions:1.0",
+        "pretrained_head":             "rna_seq:NA,splice_usage:NA,splice_junctions:NA,splice_site:0",
+        "use_gtf":                     False,
+        "rope":                        "truncated",
+        "junction_loss":               "normalized",
+        "mode":                        "linear-probe",
+        "junction_position_source":    "annotated",
+        "gradient_accumulation_steps": SF3B1_CFG["gradient_accumulation_steps"],
+    },
 }
 
 print(list(ALL_RUNS.keys()))
@@ -114,7 +124,7 @@ def _gres(wildcards):
 # Rules
 # ---------------------------------------------------------------------------
 
-_EPOCHS = 5 #SF3B1_CFG["epochs"]
+_EPOCHS = 10 #SF3B1_CFG["epochs"]
 
 rule all:
     input:
@@ -178,7 +188,7 @@ rule full_finetune:
         lr_schedule_args             = _lr_schedule_args,
     threads: _NUM_GPUS * 20
     resources:
-        runtime   = int(24*60),  # hours in minutes
+        runtime   = int(48*60),  # hours in minutes
         gres      = _gres,
         partition = "acc_ehpc",
         qos       = "acc_ehpc"
@@ -217,6 +227,7 @@ rule full_finetune:
             --sequence-length {params.sequence_length} \
             --track-means-samples {params.track_means_samples} \
             --save-every-steps {params.save_every_steps} \
+            --no-val-pearson \
             --run-name {wildcards.run_name} \
             --max-grad-norm 1.0 \
             --seed 1234 \
@@ -227,10 +238,8 @@ rule full_finetune:
             {params.junction_position_source_arg}
 
         rm -f "$FINETUNE_SCRIPT"
-
-        find "{params.output_dir}/{wildcards.run_name}" -name "*.pth" ! -name "best_model.pth" -printf "%T@ %p\n" \
-            | sort -n | head -n -1 | awk '{{print $2}}' | xargs -r rm -f
-
+        
+        
         echo "Done!"
         """
 

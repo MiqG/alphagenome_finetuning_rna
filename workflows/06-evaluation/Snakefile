@@ -1,0 +1,166 @@
+"""
+Workflow 06 — Evaluation of finetuned AlphaGenome models on FOLD_1 test set.
+
+For each run in ALL_RUNS, runs:
+  1. collect_predictions  — single-GPU inference on test.bed, writes 5 prediction parquets
+  2. compute_metrics      — computes all paper metrics from the parquets
+
+Outputs:
+  results/evaluation/alphagenome_pytorch/full/{run_name}/predictions/*.parquet
+  results/evaluation/alphagenome_pytorch/full/{run_name}/metrics.json
+  results/evaluation/alphagenome_pytorch/full/{run_name}/metrics.parquet
+
+Run with:
+    snakemake -s workflows/06-evaluation/Snakefile --use-conda [-n]
+"""
+
+import os
+
+configfile: "config/config.yaml"
+
+DATA_DIR        = config["rnaseq"]["sf3b1mut"]["path"]
+FINETUNE_DIR    = "results/finetuning/alphagenome_pytorch/full"
+OUTPUT_DIR      = "results/evaluation/alphagenome_pytorch/full"
+FOLDS_DIR       = config["finetuning"]["alphagenome"]["folds_dir"]
+FOLD            = config["preprocessing"]["overfitting"]["fold"]
+SAMPLES         = config["preprocessing"]["overfitting"]["samples"]
+BIGWIG_STRANDS  = ["forward", "reverse"]
+
+COLLECT_SCRIPT  = "src/scripts/collect_predictions.py"
+METRICS_SCRIPT  = "src/scripts/compute_eval_metrics.py"
+
+# Runs to evaluate — add more as needed
+ALL_RUNS = [
+    "randinit__newloss__annotated__frozen__multigpu_ddp",
+    # "randinit__newloss__predicted__frozen__multigpu_ddp",
+]
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _bigwigs(wildcards):
+    return [
+        os.path.join(DATA_DIR, "STAR", sample,
+                     "paper_pass.Aligned.sortedByCoord.out.filtered.{}.bw".format(strand))
+        for sample in SAMPLES
+        for strand in BIGWIG_STRANDS
+    ]
+
+
+def _ssu_parquets(wildcards):
+    return [
+        os.path.join(DATA_DIR, "STAR", sample, "paper_pass.ssu.parquet")
+        for sample in SAMPLES
+    ]
+
+
+def _star_junctions(wildcards):
+    return [
+        os.path.join(DATA_DIR, "STAR", sample, "paper_pass.SJ.out.tab")
+        for sample in SAMPLES
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Rules
+# ---------------------------------------------------------------------------
+
+rule all:
+    input:
+        expand(
+            os.path.join(OUTPUT_DIR, "{run_name}", "metrics.parquet"),
+            run_name=ALL_RUNS,
+        ),
+
+rule collect_predictions:
+    """Single-GPU inference on all test intervals — writes prediction parquets."""
+    input:
+        checkpoint       = os.path.join(FINETUNE_DIR, "{run_name}", "best_model.pth"),
+        pretrained       = config["alphagenome_pytorch"]["paths"]["weights"],
+        test_bed         = os.path.join(FOLDS_DIR, FOLD, "test.bed"),
+        genome           = config["gencode"]["paths"]["fasta"],
+        gtf_parquet      = config["gencode"]["paths"]["gtf_parquet"],
+        bigwigs          = _bigwigs,
+        ssu_parquets     = _ssu_parquets,
+        star_junctions   = _star_junctions,
+    output:
+        rna_seq          = os.path.join(OUTPUT_DIR, "{run_name}", "predictions", "rna_seq_per_gene.parquet"),
+        splice_site      = os.path.join(OUTPUT_DIR, "{run_name}", "predictions", "splice_site_scores.parquet"),
+        ssu              = os.path.join(OUTPUT_DIR, "{run_name}", "predictions", "ssu_scores.parquet"),
+        junctions        = os.path.join(OUTPUT_DIR, "{run_name}", "predictions", "junction_scores.parquet"),
+        psi              = os.path.join(OUTPUT_DIR, "{run_name}", "predictions", "psi_scores.parquet"),
+        junction_totals  = os.path.join(OUTPUT_DIR, "{run_name}", "predictions", "junction_totals.parquet"),
+    params:
+        output_dir       = lambda wildcards: os.path.join(OUTPUT_DIR, wildcards.run_name, "predictions"),
+        samples          = " ".join(SAMPLES),
+        sequence_length  = config["finetuning"]["alphagenome"]["sf3b1mut"]["sequence_length"],
+    benchmark:
+        os.path.join(OUTPUT_DIR, "benchmarks", "{run_name}", "collect_predictions.tsv")
+    threads: 20
+    resources:
+        runtime   = int(12 * 60),
+        gres      = "gpu:1",
+        partition = "acc_ehpc",
+        qos       = "acc_ehpc",
+    conda:
+        "alphagenome_pytorch"
+    shell:
+        """
+        set -eo pipefail
+
+        python {COLLECT_SCRIPT} \
+            --pretrained-weights {input.pretrained} \
+            --checkpoint {input.checkpoint} \
+            --test-bed {input.test_bed} \
+            --genome {input.genome} \
+            --gtf-parquet {input.gtf_parquet} \
+            --bigwigs {input.bigwigs} \
+            --ssu-parquets {input.ssu_parquets} \
+            --star-junctions {input.star_junctions} \
+            --samples {params.samples} \
+            --sequence-length {params.sequence_length} \
+            --dtype bfloat16 \
+            --output-dir {params.output_dir}
+
+        echo "Done collecting predictions for {wildcards.run_name}"
+        """
+
+
+rule compute_metrics:
+    """Compute all evaluation metrics from prediction parquets."""
+    input:
+        rna_seq          = os.path.join(OUTPUT_DIR, "{run_name}", "predictions", "rna_seq_per_gene.parquet"),
+        splice_site      = os.path.join(OUTPUT_DIR, "{run_name}", "predictions", "splice_site_scores.parquet"),
+        ssu              = os.path.join(OUTPUT_DIR, "{run_name}", "predictions", "ssu_scores.parquet"),
+        junctions        = os.path.join(OUTPUT_DIR, "{run_name}", "predictions", "junction_scores.parquet"),
+        psi              = os.path.join(OUTPUT_DIR, "{run_name}", "predictions", "psi_scores.parquet"),
+        junction_totals  = os.path.join(OUTPUT_DIR, "{run_name}", "predictions", "junction_totals.parquet"),
+    output:
+        metrics_json     = os.path.join(OUTPUT_DIR, "{run_name}", "metrics.json"),
+        metrics_parquet  = os.path.join(OUTPUT_DIR, "{run_name}", "metrics.parquet"),
+    params:
+        predictions_dir  = lambda wildcards: os.path.join(OUTPUT_DIR, wildcards.run_name, "predictions"),
+        output_dir       = lambda wildcards: os.path.join(OUTPUT_DIR, wildcards.run_name),
+    benchmark:
+        os.path.join(OUTPUT_DIR, "benchmarks", "{run_name}", "compute_metrics.tsv")
+    threads: 4
+    resources:
+        mem_mb    = 16000,
+        runtime   = int(30),
+        gres      = "none",
+        partition = "gpp",
+        qos       = "gp_ehpc",
+    conda:
+        "alphagenome_pytorch"
+    shell:
+        """
+        set -eo pipefail
+
+        python {METRICS_SCRIPT} \
+            --predictions-dir {params.predictions_dir} \
+            --output-dir {params.output_dir}
+
+        echo "Done computing metrics for {wildcards.run_name}"
+        """
