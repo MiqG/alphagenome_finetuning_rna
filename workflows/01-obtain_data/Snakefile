@@ -19,6 +19,8 @@ include: "rules/gencode.smk"
 include: "rules/sf3b1mut.smk"
 include: "rules/alphagenome.smk"
 include: "rules/comparison_ssu.smk"
+include: "rules/alphagenome_jax.smk"
+include: "rules/k562.smk"
 
 rule all:
     input:
@@ -59,3 +61,30 @@ rule all:
             sample=SSU_BENCHMARK_SAMPLES,
         ),
         os.path.join(SSU_OUTPUT_DIR, "benchmarks", "benchmarks.parquet"),
+
+        # AlphaGenome JAX pretraining TFRecords + extracted K562 SSU parquets
+        expand(
+            os.path.join(config["alphagenome_jax"]["path"], "{fold_split}", "{organism}", "{subset}", "{bundle}", ".done"),
+            fold_split=ALPHAGENOME_JAX_FOLD_SPLITS,
+            organism=ALPHAGENOME_JAX_ORGANISMS,
+            subset=ALPHAGENOME_JAX_SUBSETS,
+            bundle=ALPHAGENOME_JAX_BUNDLES,
+        ),
+        expand(
+            os.path.join(config["alphagenome_jax"]["path"], "{fold_split}", "{organism}", "{subset}", "k562_ssu.parquet"),
+            fold_split=ALPHAGENOME_JAX_FOLD_SPLITS,
+            organism=ALPHAGENOME_JAX_ORGANISMS,
+            subset=ALPHAGENOME_JAX_SUBSETS,
+        ),
+        os.path.join(config["alphagenome_jax"]["path"], "k562_ssu_merged.parquet"),
+
+        # K562 ENCODE RNA-seq: bigwigs and splice site usage
+        expand(
+            os.path.join(config["rnaseq"]["k562"]["path"], "STAR", "{sample}", "paper_pass.ssu.parquet"),
+            sample=K562_SAMPLES,
+        ),
+        expand(
+            os.path.join(config["rnaseq"]["k562"]["path"], "STAR", ".done_make_bw", "{sample}-{strand}"),
+            sample=K562_SAMPLES,
+            strand=K562_STRANDS,
+        ),

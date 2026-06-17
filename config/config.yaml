@@ -21,9 +21,15 @@ gencode:
 rnaseq:
   hepg2:
     path: "data/raw/ENCODE/hepg2"
+  k562:
+    path: "data/raw/ENCODE/k562"
   sf3b1mut:
     metadata: "support/ENA_filereport-compendium-sf3b1mut.tsv"
     path: "data/raw/ENA/sf3b1mut"
+
+alphagenome_jax:
+  gcs_path: "gs://alphagenome-datasets/v1/train"
+  path: "data/raw/articles/Avsec2026/alphagenome_jax"
 
 alphagenome_pytorch:
   urls:
