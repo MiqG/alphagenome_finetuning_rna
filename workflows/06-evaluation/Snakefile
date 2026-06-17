@@ -26,8 +26,8 @@ import os
 configfile: "config/config.yaml"
 
 DATA_DIR        = config["rnaseq"]["sf3b1mut"]["path"]
-FINETUNE_DIR    = "results/bsc/finetuning/alphagenome_pytorch/full"
-OUTPUT_DIR      = "results/bsc/evaluation/alphagenome_pytorch/full"
+FINETUNE_DIR    = "results/finetuning/alphagenome_pytorch/full"
+OUTPUT_DIR      = "results/evaluation/alphagenome_pytorch/full"
 FOLDS_DIR       = config["finetuning"]["alphagenome"]["folds_dir"]
 FOLD            = config["preprocessing"]["overfitting"]["fold"]
 SAMPLES         = config["preprocessing"]["overfitting"]["samples"]
@@ -183,8 +183,8 @@ rule compute_metrics:
         predictions_dir = lambda wildcards: os.path.join(OUTPUT_DIR, wildcards.run_name, "epoch{}".format(wildcards.epoch), wildcards.subset, "predictions"),
         output_dir      = lambda wildcards: os.path.join(OUTPUT_DIR, wildcards.run_name, "epoch{}".format(wildcards.epoch), wildcards.subset),
     benchmark:
-    threads: 24
         os.path.join(OUTPUT_DIR, "benchmarks", "{run_name}", "epoch{epoch}", "{subset}", "compute_metrics.tsv")
+    threads: 24
     resources:
         mem_mb    = 16000,
         runtime   = int(30),

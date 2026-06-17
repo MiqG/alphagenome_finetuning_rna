@@ -52,6 +52,7 @@ rule all:
         expand(os.path.join(SINGLE_DIR, "{density}.bed"), density=DENSITIES),
         expand(os.path.join(DEV_DIR, "{split}.bed"), split=["train", "valid"]),
         expand(os.path.join(SINGLE_DIR, "{density}", "{f}"), density=DENSITIES, f=_FWD_OUTPUTS),
+        os.path.join(FOLDS_DIR, FOLD, "train_sample.bed"),
 
 
 rule rank_intervals:
@@ -125,6 +126,27 @@ rule select_dev_intervals:
             --n-random {params.n_random} \
             --seed {params.seed} \
             --output {output.bed}
+        """
+
+
+rule sample_train_intervals:
+    """Random sample of FOLD train.bed matching test.bed size (overfitting check)."""
+    input:
+        train = os.path.join(FOLDS_DIR, FOLD, "train.bed"),
+        test  = os.path.join(FOLDS_DIR, FOLD, "test.bed"),
+    output:
+        bed   = os.path.join(FOLDS_DIR, FOLD, "train_sample.bed"),
+    params:
+        script = "src/scripts/sample_train_bed.py",
+        seed   = PREP_CFG["dev"]["seed"],
+    conda:
+        "alphagenome_finetuning_rna"
+    shell:
+        """
+        python {params.script} \
+            --folds-dir {FOLDS_DIR} \
+            --fold {FOLD} \
+            --seed {params.seed}
         """
 
 
