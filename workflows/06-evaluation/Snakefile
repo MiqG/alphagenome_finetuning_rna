@@ -34,7 +34,7 @@ METRICS_SCRIPT  = "src/scripts/compute_eval_metrics.py"
 
 # Map run_name -> list of epochs to evaluate
 ALL_RUNS = {
-    "randinit__newloss__annotated__frozen__multigpu_ddp": [5, 10],
+    "randinit__newloss__annotated__frozen__multigpu_ddp": [5, 10, 15, 20],
     # "randinit__newloss__predicted__frozen__multigpu_ddp": [5, 10],
 }
 
@@ -158,7 +158,7 @@ rule compute_metrics:
         output_dir       = lambda wildcards: os.path.join(OUTPUT_DIR, wildcards.run_name, "epoch{}".format(wildcards.epoch)),
     benchmark:
         os.path.join(OUTPUT_DIR, "benchmarks", "{run_name}", "epoch{epoch}", "compute_metrics.tsv")
-    threads: 4
+    threads: 24
     resources:
         mem_mb    = 16000,
         runtime   = int(30),
