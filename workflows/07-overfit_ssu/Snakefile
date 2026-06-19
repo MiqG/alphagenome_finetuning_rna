@@ -1,0 +1,271 @@
+"""
+SSU overfitting benchmark: verifies the coverage-based mask fix for splice site usage.
+
+Trains on a single medium-density interval for 200 epochs using:
+  - SF3B1-mutant samples (SRR17111303, SRR17111311) — the actual finetuning data
+  - K562 samples (ENCSR000AEM rep1/rep2, ENCSR545DKY rep1/rep2) — pretraining data distribution
+
+Three loss configurations compared per dataset:
+  allpos    — min_alpha_juncs=0 (ones_like mask, 430:1 imbalance — control)
+  alpha5    — min_alpha_juncs=5 (new default)
+  alpha10   — min_alpha_juncs=10 (stricter)
+
+All runs use: linear-probe, bfloat16, constant LR 1e-3, 1 GPU, splice_usage:1.0 only,
+--eval-train-pearson to track SSU r per epoch.
+
+Run with:
+    snakemake -s workflows/07-overfit_ssu/Snakefile --use-conda [-n]
+"""
+
+import os
+
+configfile: "config/config.yaml"
+
+FINETUNE_SCRIPT = config["finetuning"]["alphagenome"]["finetune_script"]
+SINGLE_BED_DIR  = config["preprocessing"]["overfitting"]["single"]["output_dir"]
+OUTPUT_DIR      = "results/finetuning/alphagenome_pytorch/overfitting/ssu"
+
+SF3B1_SAMPLES = config["preprocessing"]["overfitting"]["samples"]
+K562_SAMPLES  = ["ENCSR000AEM_rep1", "ENCSR000AEM_rep2"]
+BIGWIG_STRANDS = ["forward", "reverse"]
+
+SF3B1_DATA_DIR = config["rnaseq"]["sf3b1mut"]["path"]
+K562_DATA_DIR  = config["rnaseq"]["k562"]["path"]
+
+# ---------------------------------------------------------------------------
+# Validate that all required input files exist at parse time
+# ---------------------------------------------------------------------------
+
+def _check_files(paths, label):
+    missing = [p for p in paths if not os.path.exists(p)]
+    if missing:
+        raise ValueError(
+            "Missing {} files:\n  {}".format(label, "\n  ".join(missing))
+        )
+
+_check_files(
+    [
+        os.path.join(SF3B1_DATA_DIR, "STAR", s, "paper_pass.ssu.parquet")
+        for s in SF3B1_SAMPLES
+    ] + [
+        os.path.join(SF3B1_DATA_DIR, "STAR", s, "paper_pass.SJ.out.tab")
+        for s in SF3B1_SAMPLES
+    ] + [
+        os.path.join(SF3B1_DATA_DIR, "STAR", s,
+                     "paper_pass.Aligned.sortedByCoord.out.filtered.{}.bw".format(strand))
+        for s in SF3B1_SAMPLES for strand in BIGWIG_STRANDS
+    ],
+    "SF3B1",
+)
+
+_check_files(
+    [
+        os.path.join(K562_DATA_DIR, "STAR", s, "paper_pass.ssu.parquet")
+        for s in K562_SAMPLES
+    ] + [
+        os.path.join(K562_DATA_DIR, "STAR", s, "paper_pass.SJ.out.tab")
+        for s in K562_SAMPLES
+    ] + [
+        os.path.join(K562_DATA_DIR, "STAR", s,
+                     "paper_pass.Aligned.sortedByCoord.out.filtered.{}.bw".format(strand))
+        for s in K562_SAMPLES for strand in BIGWIG_STRANDS
+    ],
+    "K562",
+)
+
+# ---------------------------------------------------------------------------
+# Run matrix: dataset x min_alpha_juncs
+# ---------------------------------------------------------------------------
+
+_ALPHA_CONFIGS = {
+    "allpos":  0,
+    "alpha5":  5,
+    "alpha10": 10,
+}
+
+ALL_RUNS = {}
+for _alpha_key, _alpha_val in _ALPHA_CONFIGS.items():
+    ALL_RUNS["sf3b1__{}" .format(_alpha_key)] = {
+        "dataset":        "sf3b1",
+        "min_alpha_juncs": _alpha_val,
+    }
+    ALL_RUNS["k562__{}".format(_alpha_key)] = {
+        "dataset":        "k562",
+        "min_alpha_juncs": _alpha_val,
+    }
+
+# ---------------------------------------------------------------------------
+# Helper functions
+# ---------------------------------------------------------------------------
+
+def _bigwigs(wildcards):
+    dataset = ALL_RUNS[wildcards.run_name]["dataset"]
+    if dataset == "sf3b1":
+        samples, data_dir = SF3B1_SAMPLES, SF3B1_DATA_DIR
+    else:
+        samples, data_dir = K562_SAMPLES, K562_DATA_DIR
+    return [
+        os.path.join(data_dir, "STAR", s,
+                     "paper_pass.Aligned.sortedByCoord.out.filtered.{}.bw".format(strand))
+        for s in samples for strand in BIGWIG_STRANDS
+    ]
+
+def _star_junctions(wildcards):
+    dataset = ALL_RUNS[wildcards.run_name]["dataset"]
+    if dataset == "sf3b1":
+        samples, data_dir = SF3B1_SAMPLES, SF3B1_DATA_DIR
+    else:
+        samples, data_dir = K562_SAMPLES, K562_DATA_DIR
+    return [
+        os.path.join(data_dir, "STAR", s, "paper_pass.SJ.out.tab")
+        for s in samples
+    ]
+
+def _ssu_parquets(wildcards):
+    dataset = ALL_RUNS[wildcards.run_name]["dataset"]
+    if dataset == "sf3b1":
+        samples, data_dir = SF3B1_SAMPLES, SF3B1_DATA_DIR
+    else:
+        samples, data_dir = K562_SAMPLES, K562_DATA_DIR
+    return [
+        os.path.join(data_dir, "STAR", s, "paper_pass.ssu.parquet")
+        for s in samples
+    ]
+
+def _min_alpha_juncs(wildcards):
+    return ALL_RUNS[wildcards.run_name]["min_alpha_juncs"]
+
+# ---------------------------------------------------------------------------
+# Rules
+# ---------------------------------------------------------------------------
+
+RUNS_OI = list(ALL_RUNS.keys())
+RUNS_OI = [
+    #'sf3b1__allpos', 'sf3b1__alpha5', 'sf3b1__alpha10',
+    'k562__allpos', 'k562__alpha5', 'k562__alpha10'
+]
+print(RUNS_OI)
+
+rule all:
+    input:
+        expand(
+            os.path.join(OUTPUT_DIR, "{run_name}", "best_model.pth"),
+            run_name=RUNS_OI,
+        ),
+        os.path.join(OUTPUT_DIR, "summary", "epoch_logs.parquet"),
+
+
+rule overfit_ssu:
+    """Overfit SSU head on single interval; compare mask strategies and datasets."""
+    wildcard_constraints:
+        run_name = "|".join(RUNS_OI),
+    input:
+        weights        = ancient(config["alphagenome_pytorch"]["paths"]["weights"]),
+        genome         = config["gencode"]["paths"]["fasta"],
+        bed            = os.path.join(SINGLE_BED_DIR, "medium.bed"),
+        bigwigs        = _bigwigs,
+        star_junctions = _star_junctions,
+        ssu_parquets   = _ssu_parquets,
+    output:
+        checkpoint = os.path.join(OUTPUT_DIR, "{run_name}", "best_model.pth"),
+    params:
+        num_gpus         = 1,
+        modality_bigwig  = config["finetuning"]["alphagenome"]["sf3b1mut"]["modality_bigwig"],
+        modality_splice  = config["finetuning"]["alphagenome"]["sf3b1mut"]["modality_splicing"],
+        sequence_length  = config["finetuning"]["alphagenome"]["sf3b1mut"]["sequence_length"],
+        track_means_samples = config["finetuning"]["alphagenome"]["sf3b1mut"]["track_means_samples"],
+        output_dir       = OUTPUT_DIR,
+        min_alpha_juncs  = _min_alpha_juncs,
+    threads: 20
+    resources:
+        runtime   = int(2*60),
+        gres      = "gpu:1",
+        partition = "acc_ehpc",
+        qos       = "acc_ehpc"
+    conda:
+        "alphagenome_pytorch"
+    retries: 1
+    shell:
+        """
+        set -eo pipefail
+        export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+        FINETUNE_SCRIPT=$(mktemp /tmp/finetune_XXXXXX.py)
+        cp {FINETUNE_SCRIPT} "$FINETUNE_SCRIPT"
+
+        MASTER_PORT=$(python -c "import socket; s=socket.socket(); s.bind(('',0)); print(s.getsockname()[1]); s.close()")
+
+        torchrun --nproc_per_node={params.num_gpus} --master_port "$MASTER_PORT" "$FINETUNE_SCRIPT" \
+            --num-workers {threads} \
+            --mode linear-probe \
+            --modality-weights "rna_seq:1.0,splice_site:1.0,splice_usage:1.0,splice_junctions:1.0" \
+            --genome {input.genome} \
+            --modality {params.modality_bigwig} --bigwig {input.bigwigs} \
+            --modality {params.modality_splice} --star-junctions {input.star_junctions} --ssu {input.ssu_parquets} \
+            --train-bed {input.bed} \
+            --val-bed {input.bed} \
+            --pretrained-weights {input.weights} \
+            --gradient-checkpointing \
+            --resume auto \
+            --lr 1e-3 \
+            --warmup-steps 0 \
+            --lr-schedule constant \
+            --weight-decay 0 \
+            --batch-size 1 \
+            --gradient-accumulation-steps 1 \
+            --epochs 200 \
+            --output-dir {params.output_dir} \
+            --sequence-length {params.sequence_length} \
+            --track-means-samples {params.track_means_samples} \
+            --save-every 100 \
+            --run-name {wildcards.run_name} \
+            --max-grad-norm 1.0 \
+            --seed 1234 \
+            --pretrained-head-samples "rna_seq:NA,splice_usage:NA,splice_junctions:NA,splice_site:NA" \
+            --organism human \
+            --rope-init truncated_normal \
+            --junction-loss normalized \
+            --junction-position-source annotated \
+            --dtype bfloat16 \
+            --eval-train-pearson \
+            --min-alpha-juncs {params.min_alpha_juncs}
+
+        rm -f "$FINETUNE_SCRIPT"
+
+        find "{params.output_dir}/{wildcards.run_name}" -name "*.pth" ! -name "best_model.pth" -printf "%T@ %p\n" \
+            | sort -n | head -n -1 | awk '{{print $2}}' | xargs -r rm -f
+
+        echo "Done!"
+        """
+
+
+rule combine_epoch_logs:
+    params:
+        logs = lambda wildcards: expand(
+            os.path.join(OUTPUT_DIR, "{run_name}", "epoch_log.csv"),
+            run_name=RUNS_OI,
+        )
+    input:
+        models = expand(
+            os.path.join(OUTPUT_DIR, "{run_name}", "best_model.pth"),
+            run_name=RUNS_OI,
+        )
+    output:
+        combined = os.path.join(OUTPUT_DIR, "summary", "epoch_logs.parquet")
+    threads: 1
+    resources:
+        runtime   = int(0.1*60),
+        gres      = "none",
+        partition = "gpp",
+        qos       = "gp_ehpc"
+    run:
+        import pandas as pd
+
+        combined = pd.concat([
+            pd.read_csv(f).assign(
+                run_name = os.path.basename(os.path.dirname(f)),
+            )
+            for f in params.logs
+        ])
+        combined.to_parquet(output.combined, index=False, compression="zstd")
+        print("Done!")
