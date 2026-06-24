@@ -440,7 +440,7 @@ def main() -> None:
     for idx, (path, sid) in enumerate(zip(args.ssu_parquets, args.samples)):
         df = pd.read_parquet(
             path,
-            columns=["chrom", "strand", "role", "exon_pos", "ssu_spliser"],
+            columns=["chrom", "strand", "role", "exon_pos", "alpha_juncs", "ssu_spliser"],
         )
         df = df[df["ssu_spliser"].notna()].reset_index(drop=True)
         df["sample_id"] = sid
@@ -607,14 +607,16 @@ def main() -> None:
                 continue
             s_idx = int(ssu_row["sample_idx"])
             strand = ssu_row["strand"]
-            # Track layout: [s0_pos, s1_pos, ..., s0_neg, s1_neg, ...]
-            t_idx = s_idx if strand == "+" else n_ssu_tracks // 2 + s_idx
+            # Track layout: [s0_pos, s0_neg, s1_pos, s1_neg, ...] — alternating per sample,
+            # matching SplicingDataset and the RNA-seq bigwig convention.
+            t_idx = s_idx * 2 if strand == "+" else s_idx * 2 + 1
             ssu_rows.append({
                 "chrom": chrom,
                 "exon_pos_1based": int(ssu_row["exon_pos"]),
                 "strand": strand,
                 "role": ssu_row["role"],
                 "sample_id": ssu_row["sample_id"],
+                "alpha_juncs": int(ssu_row["alpha_juncs"]),
                 "pred_ssu": float(usage_pred[rel_pos, t_idx]),
                 "obs_ssu": float(ssu_row["ssu_spliser"]),
             })

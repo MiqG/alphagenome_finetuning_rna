@@ -53,6 +53,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--output-dir", required=True)
     p.add_argument("--min-gene-tracks", type=int, default=2,
                    help="Minimum number of tracks a gene must appear in to be included in correlation")
+    p.add_argument("--min-alpha-juncs", type=int, default=5,
+                   help="When >0 and alpha_juncs column is present in ssu_scores.parquet, report SSU "
+                        "Pearson both unfiltered and filtered to alpha_juncs >= this value")
     return p.parse_args()
 
 
@@ -223,7 +226,12 @@ def compute_splice_site_metrics(df: pd.DataFrame) -> dict[str, float]:
 # SSU Pearson R
 # ---------------------------------------------------------------------------
 
-def compute_ssu_metrics(df: pd.DataFrame) -> dict[str, float]:
+def compute_ssu_metrics(df: pd.DataFrame, suffix: str = "") -> dict[str, float]:
+    """Pearson r per sample between pred_ssu and obs_ssu.
+
+    suffix: inserted before the sample id, e.g. "_alpha5" → ssu_pearson_r_alpha5_{sample}.
+    Use "" for the unfiltered set and e.g. "_alphaN" for the depth-filtered set.
+    """
     metrics: dict[str, float] = {}
     if df.empty:
         return metrics
@@ -232,11 +240,11 @@ def compute_ssu_metrics(df: pd.DataFrame) -> dict[str, float]:
     for sample_id, grp in df.groupby("sample_id"):
         r = safe_pearson(grp["pred_ssu"].values, grp["obs_ssu"].values)
         if r is not None:
-            metrics["ssu_pearson_r_{}".format(sample_id)] = r
+            metrics["ssu_pearson_r{}_{}".format(suffix, sample_id)] = r
             per_sample.append(r)
 
     if per_sample:
-        metrics["ssu_pearson_r_mean"] = float(np.mean(per_sample))
+        metrics["ssu_pearson_r{}_mean".format(suffix)] = float(np.mean(per_sample))
 
     return metrics
 
@@ -370,6 +378,12 @@ def main() -> None:
 
     print("Computing SSU Pearson r...")
     all_metrics.update(compute_ssu_metrics(ssu_df))
+    if args.min_alpha_juncs > 0 and "alpha_juncs" in ssu_df.columns:
+        ssu_df_filtered = ssu_df[ssu_df["alpha_juncs"] >= args.min_alpha_juncs]
+        suffix = "_alpha{}".format(args.min_alpha_juncs)
+        print("  also computing SSU Pearson r with alpha_juncs >= {} ({:,} / {:,} sites)".format(
+            args.min_alpha_juncs, len(ssu_df_filtered), len(ssu_df)))
+        all_metrics.update(compute_ssu_metrics(ssu_df_filtered, suffix=suffix))
 
     print("Computing junction metrics...")
     all_metrics.update(compute_junction_metrics(junc_df, totals_df))
@@ -402,6 +416,7 @@ def main() -> None:
         "splice_site_auprc_macro_rnaseq",
         "splice_site_auprc_macro_gtf",
         "ssu_pearson_r_mean",
+        "ssu_pearson_r_alpha{}_mean".format(args.min_alpha_juncs),
         "junction_auprc_mean",
         "junction_count_pearson_r_mean",
         "psi5_pearson_r_mean",
