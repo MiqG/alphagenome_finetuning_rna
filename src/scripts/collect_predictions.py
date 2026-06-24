@@ -440,8 +440,9 @@ def main() -> None:
     for idx, (path, sid) in enumerate(zip(args.ssu_parquets, args.samples)):
         df = pd.read_parquet(
             path,
-            columns=["chrom", "strand", "role", "exon_pos", "ssu_approx", "alpha_juncs"],
+            columns=["chrom", "strand", "role", "exon_pos", "ssu_spliser"],
         )
+        df = df[df["ssu_spliser"].notna()].reset_index(drop=True)
         df["sample_id"] = sid
         df["sample_idx"] = idx
         ssu_per_sample.append(df)
@@ -607,7 +608,7 @@ def main() -> None:
             s_idx = int(ssu_row["sample_idx"])
             strand = ssu_row["strand"]
             # Track layout: [s0_pos, s1_pos, ..., s0_neg, s1_neg, ...]
-            t_idx = s_idx if strand == "+" else n_junc_samples + s_idx
+            t_idx = s_idx if strand == "+" else n_ssu_tracks // 2 + s_idx
             ssu_rows.append({
                 "chrom": chrom,
                 "exon_pos_1based": int(ssu_row["exon_pos"]),
@@ -615,7 +616,7 @@ def main() -> None:
                 "role": ssu_row["role"],
                 "sample_id": ssu_row["sample_id"],
                 "pred_ssu": float(usage_pred[rel_pos, t_idx]),
-                "obs_ssu": float(ssu_row["ssu_approx"]),
+                "obs_ssu": float(ssu_row["ssu_spliser"]),
             })
 
         # ── Junction predictions ───────────────────────────────────────────
