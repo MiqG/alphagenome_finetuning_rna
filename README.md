@@ -109,6 +109,17 @@ Fine-tunes AlphaGenome on the full FOLD_1 train/val split (41,699 train + 6,323 
 
 Output: `results/finetuning/alphagenome_pytorch/full/`
 
+### 7. Overfitting SSU (`workflows/07-overfit_ssu/Snakefile`)
+
+```bash
+snakemake -s workflows/07-overfit_ssu/Snakefile --use-conda -j <cores>
+```
+
+```bash
+# SLURM
+sbatch src/scripts/submit_snakemake_slurm.sh 'snakemake --cluster "sbatch --account=ehpc708 --cpus-per-task={threads} --time={resources.runtime} --partition={resources.partition} --qos={resources.qos} --gres={resources.gres} --parsable" --cluster-status src/scripts/status-sacct.sh --jobs 365 --use-conda -s workflows/07-overfit_ssu/Snakefile --latency-wait 60 --rerun-incomplete --keep-going --rerun-triggers mtime'
+```
+
 ## Citation
 
 If you use this repository, please cite our blog post (link to be added upon publication) and the original AlphaGenome paper:

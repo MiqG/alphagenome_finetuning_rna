@@ -141,7 +141,7 @@ def _min_alpha_juncs(wildcards):
 
 RUNS_OI = list(ALL_RUNS.keys())
 RUNS_OI = [
-    #'sf3b1__allpos', 'sf3b1__alpha5', 'sf3b1__alpha10',
+    'sf3b1__allpos', 'sf3b1__alpha5', 'sf3b1__alpha10',
     'k562__allpos', 'k562__alpha5', 'k562__alpha10'
 ]
 print(RUNS_OI)
@@ -213,7 +213,7 @@ rule overfit_ssu:
             --weight-decay 0 \
             --batch-size 1 \
             --gradient-accumulation-steps 1 \
-            --epochs 200 \
+            --epochs 500 \
             --output-dir {params.output_dir} \
             --sequence-length {params.sequence_length} \
             --track-means-samples {params.track_means_samples} \

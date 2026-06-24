@@ -53,6 +53,18 @@ ALL_RUNS = {
         "mode":                        "linear-probe",
         "junction_position_source":    "annotated",
         "gradient_accumulation_steps": SF3B1_CFG["gradient_accumulation_steps"],
+        "min_alpha_juncs":             0,
+    },
+    "randinit__newloss__annotated__frozen__multigpu_ddp__alpha5": {
+        "modality_weights":            "rna_seq:1.0,splice_site:1.0,splice_usage:1.0,splice_junctions:1.0",
+        "pretrained_head":             "rna_seq:NA,splice_usage:NA,splice_junctions:NA,splice_site:0",
+        "use_gtf":                     False,
+        "rope":                        "truncated",
+        "junction_loss":               "normalized",
+        "mode":                        "linear-probe",
+        "junction_position_source":    "annotated",
+        "gradient_accumulation_steps": SF3B1_CFG["gradient_accumulation_steps"],
+        "min_alpha_juncs":             5,
     },
 }
 
@@ -111,6 +123,10 @@ def _lr_schedule_args(wildcards):
 
 def _gradient_accumulation_steps(wildcards):
     return ALL_RUNS[wildcards.run_name]["gradient_accumulation_steps"]
+
+
+def _min_alpha_juncs(wildcards):
+    return ALL_RUNS[wildcards.run_name].get("min_alpha_juncs", 0)
 
 
 def _gres(wildcards):
@@ -175,6 +191,7 @@ rule full_finetune:
         epochs                       = _EPOCHS,
         batch_size                   = SF3B1_CFG["batch_size"],
         gradient_accumulation_steps  = _gradient_accumulation_steps,
+        min_alpha_juncs              = _min_alpha_juncs,
         track_means_samples          = SF3B1_CFG["track_means_samples"],
         save_every_steps             = SF3B1_CFG["save_every_steps"],
         output_dir                   = OUTPUT_DIR,
@@ -235,7 +252,8 @@ rule full_finetune:
             {params.gtf_arg} \
             {params.rope_arg} \
             {params.junction_loss_arg} \
-            {params.junction_position_source_arg}
+            {params.junction_position_source_arg} \
+            --min-alpha-juncs {params.min_alpha_juncs}
 
         rm -f "$FINETUNE_SCRIPT"
         
