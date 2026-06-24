@@ -1,4 +1,13 @@
 """
+rsync -av --include="*/"\
+    --include="paper_pass.ssu.parquet"\
+    --include="paper_pass.SJ.out.tab"\
+    --include="paper_pass.Aligned.sortedByCoord.out.filtered.forward.bw"\
+    --include="paper_pass.Aligned.sortedByCoord.out.filtered.reverse.bw"\
+    --exclude="*"\
+    data/raw/ENCODE/k562/STAR/ crg467900@transfer2.bsc.es:/home/crg/crg467900/projects/alphagenome_finetuning_rna/data/raw/ENCODE/k562/STAR/
+
+
 SSU overfitting benchmark: verifies the coverage-based mask fix for splice site usage.
 
 Trains on a single medium-density interval for 200 epochs using:
