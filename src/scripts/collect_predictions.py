@@ -35,12 +35,16 @@ import random
 
 import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
 import pyBigWig
 import pyfaidx
 import torch
 
 from alphagenome_pytorch import AlphaGenome
 from alphagenome_pytorch.extensions.finetuning.heads import create_finetuning_head
+from alphagenome_pytorch.extensions.finetuning.star_junctions import (
+    normalize_junctions_per_sample,
+)
 from alphagenome_pytorch.extensions.finetuning.transfer import (
     add_head,
     load_trunk,
@@ -423,10 +427,13 @@ def main() -> None:
     assert len(args.star_junctions) == len(args.samples), \
         "--star-junctions and --samples must have the same length"
 
-    star_per_sample: list[pd.DataFrame] = [
-        read_star_junctions(path, sid, idx)
-        for idx, (path, sid) in enumerate(zip(args.star_junctions, args.samples))
-    ]
+    star_per_sample: list[pd.DataFrame] = []
+    for idx, (path, sid) in enumerate(zip(args.star_junctions, args.samples)):
+        junc = read_star_junctions(path, sid, idx)
+        junc = junc[junc["n_uniquely_mapped_reads"] >= 1].copy()
+        junc["count"] = junc["n_uniquely_mapped_reads"].astype(float)
+        junc = normalize_junctions_per_sample(junc)   # CPM → clip 99.99th pct → scale by mean
+        star_per_sample.append(junc)
     star_all = pd.concat(star_per_sample, ignore_index=True)
     # Merged across samples for building position tensors
     star_merged = star_all.drop_duplicates(
@@ -436,12 +443,16 @@ def main() -> None:
     # --- Load SSU parquets ---
     print("Loading SSU parquets...")
     assert len(args.ssu_parquets) == len(args.samples)
+    _SSU_VALUE_COLS = ["ssu_spliser", "ssu_full", "ssu_approx"]
     ssu_per_sample: list[pd.DataFrame] = []
     for idx, (path, sid) in enumerate(zip(args.ssu_parquets, args.samples)):
-        df = pd.read_parquet(
-            path,
-            columns=["chrom", "strand", "role", "exon_pos", "alpha_juncs", "ssu_spliser"],
-        )
+        schema_cols = set(pq.read_schema(path).names)
+        value_col = next((c for c in _SSU_VALUE_COLS if c in schema_cols), None)
+        if value_col is None:
+            raise ValueError("SSU parquet {} has none of {}".format(path, _SSU_VALUE_COLS))
+        df = pd.read_parquet(path, columns=["chrom", "strand", "role", "exon_pos", "alpha_juncs", value_col])
+        if value_col != "ssu_spliser":
+            df = df.rename(columns={value_col: "ssu_spliser"})
         df = df[df["ssu_spliser"].notna()].reset_index(drop=True)
         df["sample_id"] = sid
         df["sample_idx"] = idx
@@ -640,8 +651,8 @@ def main() -> None:
                 channel = ch_offset + s_idx
                 pred_mat = pred_counts[:n_d, :n_a, channel]  # (n_d, n_a)
 
-                # Build ground-truth matrix from STAR observations
-                gt_mat = np.zeros((n_d, n_a), dtype=np.int32)
+                # Build ground-truth matrix from STAR observations (normalized counts)
+                gt_mat = np.zeros((n_d, n_a), dtype=np.float32)
                 obs_s_sample = obs_s[obs_s["sample_idx"] == s_idx]
                 for _, jrow in obs_s_sample.iterrows():
                     d_rel = int(jrow["donor_pos"]) - 1 - window_start
@@ -649,7 +660,7 @@ def main() -> None:
                     di = pos_lookup[d_role].get(d_rel)
                     ai = pos_lookup[a_role].get(a_rel)
                     if di is not None and ai is not None and di < n_d and ai < n_a:
-                        gt_mat[di, ai] = int(jrow["n_uniquely_mapped_reads"])
+                        gt_mat[di, ai] = float(jrow["count"])
 
                 # Store pairs with pred > 0 OR obs > 0; record n_total for auPRC denominator
                 n_total = n_d * n_a
@@ -668,7 +679,7 @@ def main() -> None:
                         "strand": strand_name,
                         "sample_id": sample_id,
                         "pred_count": float(pred_mat[di, ai]),
-                        "obs_count": int(gt_mat[di, ai]),
+                        "obs_count": float(gt_mat[di, ai]),
                     })
 
                 junction_total_rows.append({

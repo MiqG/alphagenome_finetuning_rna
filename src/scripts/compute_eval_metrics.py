@@ -56,6 +56,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--min-alpha-juncs", type=int, default=5,
                    help="When >0 and alpha_juncs column is present in ssu_scores.parquet, report SSU "
                         "Pearson both unfiltered and filtered to alpha_juncs >= this value")
+    p.add_argument("--min-junction-counts", nargs="+", type=int, default=[5],
+                   help="One or more raw-count thresholds for junction auPRC/Pearson r. "
+                        "Metrics are always reported unfiltered; each threshold additionally "
+                        "produces a filtered set with suffix _mincount<N>. Default: 5.")
     return p.parse_args()
 
 
@@ -256,6 +260,7 @@ def compute_ssu_metrics(df: pd.DataFrame, suffix: str = "") -> dict[str, float]:
 def compute_junction_metrics(
     df: pd.DataFrame,
     totals_df: pd.DataFrame,
+    suffix: str = "",
 ) -> dict[str, float]:
     """Junction auPRC and count Pearson R.
 
@@ -263,6 +268,8 @@ def compute_junction_metrics(
     from junction_totals.parquet (n_valid_pairs per interval/strand/sample).
     Pairs with pred=0 AND obs=0 were dropped at collection time; they are
     added back as synthetic zero-score negatives so the denominator is correct.
+
+    suffix: appended to all metric names, e.g. "_mincount5".
     """
     metrics: dict[str, float] = {}
 
@@ -290,11 +297,11 @@ def compute_junction_metrics(
         if y_true.sum() == 0 or len(y_true) < 2:
             continue
         ap = average_precision_score(y_true, y_score)
-        metrics["junction_auprc_{}".format(sample_id)] = float(ap)
+        metrics["junction_auprc{}_{}" .format(suffix, sample_id)] = float(ap)
         auprc_vals.append(ap)
 
     if auprc_vals:
-        metrics["junction_auprc_mean"] = float(np.mean(auprc_vals))
+        metrics["junction_auprc{}_mean".format(suffix)] = float(np.mean(auprc_vals))
 
     # Count Pearson R (log1p, non-zero observed junctions only)
     pearson_vals = []
@@ -307,10 +314,10 @@ def compute_junction_metrics(
             np.log1p(sub["obs_count"].values),
         )
         if r is not None:
-            metrics["junction_count_pearson_r_{}".format(sample_id)] = r
+            metrics["junction_count_pearson_r{}_{}" .format(suffix, sample_id)] = r
             pearson_vals.append(r)
     if pearson_vals:
-        metrics["junction_count_pearson_r_mean"] = float(np.mean(pearson_vals))
+        metrics["junction_count_pearson_r{}_mean".format(suffix)] = float(np.mean(pearson_vals))
 
     return metrics
 
@@ -387,6 +394,16 @@ def main() -> None:
 
     print("Computing junction metrics...")
     all_metrics.update(compute_junction_metrics(junc_df, totals_df))
+    for min_count in (args.min_junction_counts or []):
+        if min_count > 1 and "obs_count" in junc_df.columns:
+            junc_filtered = junc_df[junc_df["obs_count"] >= min_count]
+            suffix = "_mincount{}".format(min_count)
+            print("  also computing junction metrics with obs_count >= {} ({:,} / {:,} positives)".format(
+                min_count,
+                (junc_filtered["obs_count"] > 0).sum(),
+                (junc_df["obs_count"] > 0).sum(),
+            ))
+            all_metrics.update(compute_junction_metrics(junc_filtered, totals_df, suffix=suffix))
 
     print("Computing PSI Pearson r...")
     all_metrics.update(compute_psi_metrics(psi_df))
@@ -419,6 +436,14 @@ def main() -> None:
         "ssu_pearson_r_alpha{}_mean".format(args.min_alpha_juncs),
         "junction_auprc_mean",
         "junction_count_pearson_r_mean",
+    ] + [
+        key
+        for n in (args.min_junction_counts or [])
+        for key in [
+            "junction_auprc_mincount{}_mean".format(n),
+            "junction_count_pearson_r_mincount{}_mean".format(n),
+        ]
+    ] + [
         "psi5_pearson_r_mean",
         "psi3_pearson_r_mean",
     ]
