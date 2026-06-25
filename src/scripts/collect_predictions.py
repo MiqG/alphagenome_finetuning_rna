@@ -651,8 +651,9 @@ def main() -> None:
                 channel = ch_offset + s_idx
                 pred_mat = pred_counts[:n_d, :n_a, channel]  # (n_d, n_a)
 
-                # Build ground-truth matrix from STAR observations (normalized counts)
-                gt_mat = np.zeros((n_d, n_a), dtype=np.float32)
+                # Build ground-truth matrices: normalized (for Pearson r) and raw (for filtering)
+                gt_mat     = np.zeros((n_d, n_a), dtype=np.float32)
+                gt_mat_raw = np.zeros((n_d, n_a), dtype=np.int32)
                 obs_s_sample = obs_s[obs_s["sample_idx"] == s_idx]
                 for _, jrow in obs_s_sample.iterrows():
                     d_rel = int(jrow["donor_pos"]) - 1 - window_start
@@ -660,7 +661,8 @@ def main() -> None:
                     di = pos_lookup[d_role].get(d_rel)
                     ai = pos_lookup[a_role].get(a_rel)
                     if di is not None and ai is not None and di < n_d and ai < n_a:
-                        gt_mat[di, ai] = float(jrow["count"])
+                        gt_mat[di, ai]     = float(jrow["count"])
+                        gt_mat_raw[di, ai] = int(jrow["n_uniquely_mapped_reads"])
 
                 # Store pairs with pred > 0 OR obs > 0; record n_total for auPRC denominator
                 n_total = n_d * n_a
@@ -680,6 +682,7 @@ def main() -> None:
                         "sample_id": sample_id,
                         "pred_count": float(pred_mat[di, ai]),
                         "obs_count": float(gt_mat[di, ai]),
+                        "obs_count_raw": int(gt_mat_raw[di, ai]),
                     })
 
                 junction_total_rows.append({
