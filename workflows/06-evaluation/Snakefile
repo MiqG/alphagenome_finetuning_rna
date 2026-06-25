@@ -185,7 +185,7 @@ rule compute_metrics:
         output_dir      = lambda wildcards: os.path.join(OUTPUT_DIR, wildcards.run_name, "epoch{}".format(wildcards.epoch), wildcards.subset),
     benchmark:
         os.path.join(OUTPUT_DIR, "benchmarks", "{run_name}", "epoch{epoch}", "{subset}", "compute_metrics.tsv")
-    threads: 24
+    threads: 32
     resources:
         mem_mb    = 16000,
         runtime   = int(30),
