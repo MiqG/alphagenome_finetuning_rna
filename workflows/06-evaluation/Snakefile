@@ -204,7 +204,8 @@ rule compute_metrics:
 
         python {METRICS_SCRIPT} \
             --predictions-dir {params.predictions_dir} \
-            --output-dir {params.output_dir}
+            --output-dir {params.output_dir} \
+            --min-junction-counts 5
 
         echo "Done computing metrics for {wildcards.run_name} epoch {wildcards.epoch} subset {wildcards.subset}"
         """
