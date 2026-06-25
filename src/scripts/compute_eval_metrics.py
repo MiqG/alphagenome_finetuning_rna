@@ -57,8 +57,10 @@ def parse_args() -> argparse.Namespace:
                    help="When >0 and alpha_juncs column is present in ssu_scores.parquet, report SSU "
                         "Pearson both unfiltered and filtered to alpha_juncs >= this value")
     p.add_argument("--min-junction-counts", nargs="+", type=int, default=[5],
-                   help="One or more raw-count thresholds for junction auPRC/Pearson r. "
-                        "Metrics are always reported unfiltered; each threshold additionally "
+                   help="One or more raw-read-count thresholds applied to obs_count_raw "
+                        "(falls back to obs_count if raw column absent). Noisy positives "
+                        "below the threshold are excluded; negatives (obs=0) are kept. "
+                        "Metrics always reported unfiltered; each threshold additionally "
                         "produces a filtered set with suffix _mincount<N>. Default: 5.")
     return p.parse_args()
 
@@ -394,12 +396,15 @@ def main() -> None:
 
     print("Computing junction metrics...")
     all_metrics.update(compute_junction_metrics(junc_df, totals_df))
+    raw_col = "obs_count_raw" if "obs_count_raw" in junc_df.columns else "obs_count"
     for min_count in (args.min_junction_counts or []):
-        if min_count > 1 and "obs_count" in junc_df.columns:
-            junc_filtered = junc_df[junc_df["obs_count"] >= min_count]
+        if min_count > 1 and raw_col in junc_df.columns:
+            # Keep negatives (raw==0) and high-confidence positives (raw >= min_count);
+            # exclude noisy singletons (0 < raw < min_count) from the positive set.
+            junc_filtered = junc_df[(junc_df[raw_col] == 0) | (junc_df[raw_col] >= min_count)]
             suffix = "_mincount{}".format(min_count)
-            print("  also computing junction metrics with obs_count >= {} ({:,} / {:,} positives)".format(
-                min_count,
+            print("  also computing junction metrics with {}>= {} ({:,} / {:,} positives)".format(
+                raw_col, min_count,
                 (junc_filtered["obs_count"] > 0).sum(),
                 (junc_df["obs_count"] > 0).sum(),
             ))
