@@ -26,10 +26,10 @@ FULL_RUNS = {
     "annotated__frozen__1gpu": {
         "mode":            "linear-probe",
         "epochs":          _EPOCHS,
-        "lr":              1e-4,
-        "warmup_steps":    200,
+        "lr":              1e-3,
+        "warmup_steps":    0,
         "weight_decay":    0,
-        "batch_size":      24,
+        "batch_size":      128,
         "min_alpha_juncs": 0,
         "num_gpus":        1,
     },

@@ -35,9 +35,9 @@ DEV_RUNS = {
     "annotated__frozen__1gpu": {
         "mode":            "linear-probe",
         "epochs":          _DEV_EPOCHS,
-        "lr":              1e-4,
-        "warmup_steps":    50,
-        "batch_size":      12,
+        "lr":              1e-3,
+        "warmup_steps":    0,
+        "batch_size":      128,
         "min_alpha_juncs": 0,
         "num_gpus":        1,
     },
