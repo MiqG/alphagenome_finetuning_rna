@@ -25,11 +25,9 @@ configfile: "config/config.yaml"
 
 include: "rules/dev.smk"
 include: "rules/full.smk"
-include: "rules/evaluation.smk"
 
 
 rule all:
     input:
-        rules.all_dev.input,
+        # rules.all_dev.input,
         rules.all_full.input,
-        # rules.all_eval.input,

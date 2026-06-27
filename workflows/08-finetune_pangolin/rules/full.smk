@@ -1,22 +1,36 @@
 """
-full.smk — Full Pangolin finetuning on FOLD_1 train/val split.
+full.smk — Full Pangolin finetuning on FOLD_1 train/val split, plus evaluation.
 
 Mirrors workflow 05 (AlphaGenome full finetuning) as closely as possible.
-Primary run: linear-probe (frozen backbone), 10 epochs, 1 GPU.
+Primary run: linear-probe (frozen backbone), 1 GPU.
+
+Evaluation rules (collect_predictions + compute_metrics) are included here so
+that _EPOCHS is defined in one place only — no separate evaluation.smk needed.
 """
 
 import os
 
 DATA_DIR        = config["rnaseq"]["sf3b1mut"]["path"]
 FINETUNE_SCRIPT = "src/custom-pangolin/scripts/finetune.py"
+COLLECT_SCRIPT  = config["pangolin"]["collect_script"]
+METRICS_SCRIPT  = "src/scripts/compute_eval_metrics.py"
 FOLDS_DIR       = config["finetuning"]["alphagenome"]["folds_dir"]
 FOLD            = config["preprocessing"]["overfitting"]["fold"]
 SAMPLES         = config["preprocessing"]["overfitting"]["samples"]
 PANGOLIN_CFG    = config["pangolin"]
 
 FULL_OUTPUT_DIR = "results/finetuning/pangolin/full"
+EVAL_OUTPUT_DIR = "results/evaluation/pangolin/full"
 
-_EPOCHS = 10
+# ── Change _EPOCHS here only — evaluation rules pick it up automatically ──────
+_EPOCHS = 5
+
+EVAL_SUBSETS = ["test", "train_sample"]
+
+SUBSET_BED = {
+    "test":         os.path.join(FOLDS_DIR, FOLD, "test.bed"),
+    "train_sample": os.path.join(FOLDS_DIR, FOLD, "train_sample.bed"),
+}
 
 # ---------------------------------------------------------------------------
 # Run matrix — mirrors workflow 05 naming conventions
@@ -48,6 +62,21 @@ def _gres(wildcards):
 # Rules
 # ---------------------------------------------------------------------------
 
+_EVAL_RUN_NAMES = [r for r in FULL_RUNS for s in EVAL_SUBSETS]
+_EVAL_SUBSETS   = [s for r in FULL_RUNS for s in EVAL_SUBSETS]
+
+
+def _ssu_parquets(wildcards):
+    return [
+        os.path.join(DATA_DIR, "STAR", sample, "paper_pass.ssu.parquet")
+        for sample in SAMPLES
+    ]
+
+
+def _interval_bed(wildcards):
+    return SUBSET_BED[wildcards.subset]
+
+
 rule all_full:
     input:
         expand(
@@ -56,6 +85,13 @@ rule all_full:
             epochs=_EPOCHS,
         ),
         os.path.join(FULL_OUTPUT_DIR, "summary", "epoch_logs.parquet"),
+        expand(
+            os.path.join(EVAL_OUTPUT_DIR, "{run_name}", "epoch{epoch}", "{subset}", "metrics.parquet"),
+            zip,
+            run_name=_EVAL_RUN_NAMES,
+            epoch=_EPOCHS,
+            subset=_EVAL_SUBSETS,
+        ),
 
 
 rule pangolin_full_finetune:
@@ -164,3 +200,93 @@ rule pangolin_combine_epoch_logs:
         else:
             pd.DataFrame().to_parquet(output.combined, index=False)
         print("Done!")
+
+
+rule pangolin_collect_predictions:
+    """Single-GPU Pangolin inference on an interval BED."""
+    wildcard_constraints:
+        epoch  = r"\d+",
+        subset = r"[a-z_]+",
+    input:
+        checkpoint   = os.path.join(FULL_OUTPUT_DIR, "{run_name}", "checkpoint_epoch{epoch}.pth"),
+        interval_bed = _interval_bed,
+        genome       = config["gencode"]["paths"]["fasta"],
+        ssu_parquets = _ssu_parquets,
+    output:
+        ssu         = os.path.join(EVAL_OUTPUT_DIR, "{run_name}", "epoch{epoch}", "{subset}", "predictions", "ssu_scores.parquet"),
+        splice_site = os.path.join(EVAL_OUTPUT_DIR, "{run_name}", "epoch{epoch}", "{subset}", "predictions", "splice_site_scores.parquet"),
+    params:
+        output_dir = lambda wildcards: os.path.join(
+            EVAL_OUTPUT_DIR, wildcards.run_name,
+            "epoch{}".format(wildcards.epoch), wildcards.subset, "predictions"
+        ),
+        samples   = " ".join(SAMPLES),
+        min_alpha = 5,
+    benchmark:
+        os.path.join(EVAL_OUTPUT_DIR, "benchmarks", "{run_name}", "epoch{epoch}", "{subset}", "collect_predictions.tsv")
+    threads: 8
+    resources:
+        runtime   = int(4 * 60),
+        gres      = "gpu:1",
+        partition = "acc_ehpc",
+        qos       = "acc_ehpc",
+    conda:
+        "alphagenome_pytorch"
+    shell:
+        """
+        set -eo pipefail
+
+        python {COLLECT_SCRIPT} \
+            --checkpoint {input.checkpoint} \
+            --test-bed {input.interval_bed} \
+            --genome {input.genome} \
+            --ssu-parquets {input.ssu_parquets} \
+            --samples {params.samples} \
+            --min-alpha-juncs {params.min_alpha} \
+            --output-dir {params.output_dir}
+
+        echo "Done collecting predictions for {wildcards.run_name} epoch {wildcards.epoch} {wildcards.subset}"
+        """
+
+
+rule pangolin_compute_metrics:
+    """Compute SSU Pearson r and splice-site auPRC from prediction parquets."""
+    wildcard_constraints:
+        epoch  = r"\d+",
+        subset = r"[a-z_]+",
+    input:
+        ssu         = os.path.join(EVAL_OUTPUT_DIR, "{run_name}", "epoch{epoch}", "{subset}", "predictions", "ssu_scores.parquet"),
+        splice_site = os.path.join(EVAL_OUTPUT_DIR, "{run_name}", "epoch{epoch}", "{subset}", "predictions", "splice_site_scores.parquet"),
+    output:
+        metrics_json    = os.path.join(EVAL_OUTPUT_DIR, "{run_name}", "epoch{epoch}", "{subset}", "metrics.json"),
+        metrics_parquet = os.path.join(EVAL_OUTPUT_DIR, "{run_name}", "epoch{epoch}", "{subset}", "metrics.parquet"),
+    params:
+        predictions_dir = lambda wildcards: os.path.join(
+            EVAL_OUTPUT_DIR, wildcards.run_name,
+            "epoch{}".format(wildcards.epoch), wildcards.subset, "predictions"
+        ),
+        output_dir = lambda wildcards: os.path.join(
+            EVAL_OUTPUT_DIR, wildcards.run_name,
+            "epoch{}".format(wildcards.epoch), wildcards.subset
+        ),
+    benchmark:
+        os.path.join(EVAL_OUTPUT_DIR, "benchmarks", "{run_name}", "epoch{epoch}", "{subset}", "compute_metrics.tsv")
+    threads: 8
+    resources:
+        runtime   = int(30),
+        gres      = "none",
+        partition = "gpp",
+        qos       = "gp_ehpc",
+    conda:
+        "alphagenome_pytorch"
+    shell:
+        """
+        set -eo pipefail
+
+        python {METRICS_SCRIPT} \
+            --predictions-dir {params.predictions_dir} \
+            --output-dir {params.output_dir} \
+            --min-junction-counts 5
+
+        echo "Done computing metrics for {wildcards.run_name} epoch {wildcards.epoch} {wildcards.subset}"
+        """
