@@ -38,6 +38,12 @@ alphagenome_pytorch:
   paths:
     weights: "data/raw/articles/Avsec2026/alphagenome_pytorch/fold-1/model_fold_1.safetensors"
 
+pangolin:
+  # Pretrained Pangolin weights (model 3, tissue 0, epoch 3 — multi-tissue backbone)
+  pretrained_weights: "src/Pangolin/pangolin/models/final.3.0.3"
+  finetune_script: "src/custom-pangolin/scripts/finetune.py"
+  collect_script: "src/custom-pangolin/scripts/collect_predictions.py"
+
 borzoi:
   baskerville_path: "src/baskerville"
   num_reps: 4

@@ -1,0 +1,35 @@
+"""
+Workflow 08 — Finetune Pangolin on SF3B1 SSU data and evaluate.
+
+Pangolin (Zeng & Bromberg 2022) is a dilated-residual CNN with a 10 kb context
+window, operating at 5 kb output resolution.  We replace its 4-tissue heads with
+fresh [2-class, 1-sigmoid] heads for each (sample, strand) condition and finetune
+using the same SF3B1 SSU data and fold splits as AlphaGenome (workflow 05).
+
+NOTE on splits: Pangolin's backbone was pretrained with chromosome-based splits
+(even chrs = train, odd chrs = test), independent of AlphaGenome's FOLD_1 BED
+splits.  For downstream finetuning we use AlphaGenome's FOLD_1 train/val BEDs
+for both models so the comparison is fair.
+
+NOTE on editable install: before running this workflow, install custom-pangolin
+into the alphagenome_pytorch conda environment once:
+    conda run -n alphagenome_pytorch pip install -e src/custom-pangolin
+
+Run with:
+    snakemake -s workflows/08-finetune_pangolin/Snakefile --use-conda [-n]
+"""
+
+import os
+
+configfile: "config/config.yaml"
+
+include: "rules/dev.smk"
+include: "rules/full.smk"
+include: "rules/evaluation.smk"
+
+
+rule all:
+    input:
+        rules.all_dev.input,
+        # rules.all_full.input,
+        # rules.all_eval.input,
