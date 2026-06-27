@@ -25,3 +25,4 @@ dependencies:
   - pip
   - pip:
     - statannotations
+    - scikit-learn

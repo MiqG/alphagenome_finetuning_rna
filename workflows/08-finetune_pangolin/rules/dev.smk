@@ -3,18 +3,26 @@ dev.smk — short Pangolin training runs for parameter validation.
 
 Uses the dev BED (same as workflow 04) and a single GPU.
 5 epochs is enough to check that gradients flow, loss decreases, and checkpoints save.
+
+Also includes collect_predictions + compute_metrics on the val BED so correlation
+can be assessed without running the full evaluation workflow.
 """
 
 import os
 
 DATA_DIR        = config["rnaseq"]["sf3b1mut"]["path"]
 FINETUNE_SCRIPT = "src/custom-pangolin/scripts/finetune.py"
+COLLECT_SCRIPT  = config["pangolin"]["collect_script"]
+METRICS_SCRIPT  = "src/scripts/compute_eval_metrics.py"
 FOLDS_DIR       = config["finetuning"]["alphagenome"]["folds_dir"]
 FOLD            = config["preprocessing"]["overfitting"]["fold"]
 SAMPLES         = config["preprocessing"]["overfitting"]["samples"]
 PANGOLIN_CFG    = config["pangolin"]
 
-DEV_OUTPUT_DIR  = "results/finetuning/pangolin/dev"
+DEV_OUTPUT_DIR      = "results/finetuning/pangolin/dev"
+DEV_EVAL_OUTPUT_DIR = "results/evaluation/pangolin/dev"
+
+_DEV_VAL_BED = os.path.join(config["preprocessing"]["overfitting"]["dev"]["output_dir"], "valid.bed")
 
 # All dev runs share the same epoch count so the output path stays a literal
 _DEV_EPOCHS = 5
@@ -63,6 +71,11 @@ rule all_dev:
         expand(
             os.path.join(DEV_OUTPUT_DIR, "{run_name}", "epoch_log.csv"),
             run_name=list(DEV_RUNS.keys()),
+        ),
+        expand(
+            os.path.join(DEV_EVAL_OUTPUT_DIR, "{run_name}", "epoch{epoch}", "val", "metrics.parquet"),
+            run_name=list(DEV_RUNS.keys()),
+            epoch=list(range(1, _DEV_EPOCHS + 1)),
         ),
 
 
@@ -130,4 +143,97 @@ rule pangolin_dev_finetune:
 
         rm -f "$FINETUNE_SCRIPT"
         echo "Done!"
+        """
+
+
+rule pangolin_dev_collect_predictions:
+    """Single-GPU inference on the dev val BED — produces ssu_scores + splice_site_scores."""
+    wildcard_constraints:
+        run_name = "|".join(DEV_RUNS.keys()),
+        epoch    = r"\d+",
+    input:
+        checkpoint   = os.path.join(DEV_OUTPUT_DIR, "{run_name}", "checkpoint_epoch{epoch}.pth"),
+        interval_bed = _DEV_VAL_BED,
+        genome       = config["gencode"]["paths"]["fasta"],
+        ssu_parquets = [
+            os.path.join(DATA_DIR, "STAR", sample, "paper_pass.ssu.parquet")
+            for sample in SAMPLES
+        ],
+    output:
+        ssu         = os.path.join(DEV_EVAL_OUTPUT_DIR, "{run_name}", "epoch{epoch}", "val", "predictions", "ssu_scores.parquet"),
+        splice_site = os.path.join(DEV_EVAL_OUTPUT_DIR, "{run_name}", "epoch{epoch}", "val", "predictions", "splice_site_scores.parquet"),
+    params:
+        output_dir = lambda wildcards: os.path.join(
+            DEV_EVAL_OUTPUT_DIR, wildcards.run_name,
+            "epoch{}".format(wildcards.epoch), "val", "predictions"
+        ),
+        samples    = " ".join(SAMPLES),
+        min_alpha  = 5,
+    benchmark:
+        os.path.join(DEV_EVAL_OUTPUT_DIR, "benchmarks", "{run_name}", "epoch{epoch}", "val", "collect_predictions.tsv")
+    threads: 8
+    resources:
+        runtime   = int(2 * 60),
+        gres      = "gpu:1",
+        partition = "acc_ehpc",
+        qos       = "acc_ehpc",
+    conda:
+        "alphagenome_pytorch"
+    shell:
+        """
+        set -eo pipefail
+
+        python {COLLECT_SCRIPT} \
+            --checkpoint {input.checkpoint} \
+            --test-bed {input.interval_bed} \
+            --genome {input.genome} \
+            --ssu-parquets {input.ssu_parquets} \
+            --samples {params.samples} \
+            --min-alpha-juncs {params.min_alpha} \
+            --output-dir {params.output_dir}
+
+        echo "Done collecting dev predictions for {wildcards.run_name} epoch {wildcards.epoch}"
+        """
+
+
+rule pangolin_dev_compute_metrics:
+    """Compute SSU Pearson r and splice-site auPRC from dev predictions."""
+    wildcard_constraints:
+        run_name = "|".join(DEV_RUNS.keys()),
+        epoch    = r"\d+",
+    input:
+        ssu         = os.path.join(DEV_EVAL_OUTPUT_DIR, "{run_name}", "epoch{epoch}", "val", "predictions", "ssu_scores.parquet"),
+        splice_site = os.path.join(DEV_EVAL_OUTPUT_DIR, "{run_name}", "epoch{epoch}", "val", "predictions", "splice_site_scores.parquet"),
+    output:
+        metrics_json    = os.path.join(DEV_EVAL_OUTPUT_DIR, "{run_name}", "epoch{epoch}", "val", "metrics.json"),
+        metrics_parquet = os.path.join(DEV_EVAL_OUTPUT_DIR, "{run_name}", "epoch{epoch}", "val", "metrics.parquet"),
+    params:
+        predictions_dir = lambda wildcards: os.path.join(
+            DEV_EVAL_OUTPUT_DIR, wildcards.run_name,
+            "epoch{}".format(wildcards.epoch), "val", "predictions"
+        ),
+        output_dir = lambda wildcards: os.path.join(
+            DEV_EVAL_OUTPUT_DIR, wildcards.run_name,
+            "epoch{}".format(wildcards.epoch), "val"
+        ),
+    benchmark:
+        os.path.join(DEV_EVAL_OUTPUT_DIR, "benchmarks", "{run_name}", "epoch{epoch}", "val", "compute_metrics.tsv")
+    threads: 4
+    resources:
+        runtime   = int(30),
+        gres      = "none",
+        partition = "gpp",
+        qos       = "gp_ehpc",
+    conda:
+        "alphagenome_pytorch"
+    shell:
+        """
+        set -eo pipefail
+
+        python {METRICS_SCRIPT} \
+            --predictions-dir {params.predictions_dir} \
+            --output-dir {params.output_dir} \
+            --min-junction-counts 5
+
+        echo "Done computing dev metrics for {wildcards.run_name} epoch {wildcards.epoch}"
         """
