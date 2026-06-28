@@ -23,6 +23,7 @@ import os
 
 configfile: "config/config.yaml"
 
+include: "rules/intervals.smk"
 include: "rules/dev.smk"
 include: "rules/full.smk"
 
