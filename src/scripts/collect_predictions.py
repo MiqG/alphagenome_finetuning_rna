@@ -5,7 +5,12 @@ Collect finetuned AlphaGenome predictions on held-out test intervals.
 Runs single-GPU inference on every interval in --test-bed and writes five
 prediction parquets consumed by compute_eval_metrics.py:
 
-  rna_seq_per_gene.parquet    — per-gene exon-mean coverage (pred + obs, per track)
+  rna_seq_per_gene.parquet       — per-gene exon-mean coverage at 1 bp (pred + obs, per track)
+  rna_seq_per_gene_32bp.parquet  — same but pred aggregated into 32 bp bins (for Borzoi comparison)
+  rna_seq_profile_corr_exon_1bp.parquet  — per-track Pearson r over exon positions at 1 bp
+  rna_seq_profile_corr_full_1bp.parquet  — per-track Pearson r over full test intervals at 1 bp
+  rna_seq_profile_corr_exon_32bp.parquet — per-track Pearson r over exon positions, 32 bp bins
+  rna_seq_profile_corr_full_32bp.parquet — per-track Pearson r over full test intervals, 32 bp bins
   splice_site_scores.parquet  — per-annotated-position classification probs (all splice site
                                 positions from RNA-seq / GTF; negatives are other annotated
                                 classes, matching the publication's auPRC definition)
@@ -284,6 +289,37 @@ def get_exon_mean_pred(
     return sums / count
 
 
+def get_exon_mean_pred_binned(
+    rna_pred_binned: np.ndarray,  # (n_bins, n_tracks)
+    exon_rows: pd.DataFrame,
+    window_start: int,
+    seq_len: int,
+    bin_size: int = 32,
+) -> np.ndarray | None:
+    """Mean predicted rna_seq coverage over exon bins, per track.
+
+    Exon coordinates are floor-divided into bin_size-bp bins before averaging,
+    matching Borzoi's 32 bp output resolution.
+    """
+    n_bins = rna_pred_binned.shape[0]
+    sums = np.zeros(rna_pred_binned.shape[1], dtype=np.float64)
+    count = 0
+    for _, ex in exon_rows.iterrows():
+        rel_s = max(0, int(ex["Start"]) - window_start)
+        rel_e = min(seq_len, int(ex["End"]) - window_start)
+        if rel_e <= rel_s:
+            continue
+        bin_s = rel_s // bin_size
+        bin_e = min(((rel_e - 1) // bin_size) + 1, n_bins)
+        if bin_e <= bin_s:
+            continue
+        sums += rna_pred_binned[bin_s:bin_e].sum(axis=0)
+        count += bin_e - bin_s
+    if count == 0:
+        return None
+    return sums / count
+
+
 def get_exon_mean_obs(
     bigwigs: list,
     exon_rows: pd.DataFrame,
@@ -351,6 +387,95 @@ def compute_obs_psi(
 
 
 # ---------------------------------------------------------------------------
+# Profile correlation accumulator
+# ---------------------------------------------------------------------------
+
+class ProfileCorrAccumulator:
+    """Online Pearson r accumulator over a stream of (pred, obs) position batches.
+
+    Maintains sufficient statistics in O(n_tracks) space regardless of how many
+    positions are seen. Call update() with matching arrays of shape (m, n_tracks),
+    then result() once all intervals are processed.
+    """
+
+    def __init__(self, n_tracks: int) -> None:
+        z = np.zeros(n_tracks, dtype=np.float64)
+        self.n      = np.zeros(n_tracks, dtype=np.int64)
+        self.sum_x  = z.copy()
+        self.sum_y  = z.copy()
+        self.sum_xx = z.copy()
+        self.sum_yy = z.copy()
+        self.sum_xy = z.copy()
+
+    def update(self, x: np.ndarray, y: np.ndarray) -> None:
+        """x, y: (m, n_tracks) float64."""
+        self.n      += x.shape[0]
+        self.sum_x  += x.sum(axis=0)
+        self.sum_y  += y.sum(axis=0)
+        self.sum_xx += (x ** 2).sum(axis=0)
+        self.sum_yy += (y ** 2).sum(axis=0)
+        self.sum_xy += (x * y).sum(axis=0)
+
+    def result(self) -> np.ndarray:
+        """Return per-track Pearson r, shape (n_tracks,). NaN where undefined."""
+        n = self.n.astype(np.float64)
+        num = n * self.sum_xy - self.sum_x * self.sum_y
+        den = np.sqrt(
+            np.maximum(0.0, n * self.sum_xx - self.sum_x ** 2)
+            * np.maximum(0.0, n * self.sum_yy - self.sum_y ** 2)
+        )
+        with np.errstate(invalid="ignore", divide="ignore"):
+            return np.where(den > 0, num / den, np.nan)
+
+
+def fetch_obs_window(
+    bigwigs: list,
+    chrom: str,
+    window_start: int,
+    window_end: int,
+    chrom_sizes: dict,
+) -> np.ndarray:
+    """Return (window_end - window_start, n_tracks) float64 coverage.
+
+    Positions beyond chromosome end are filled with 0.
+    """
+    seq_len = window_end - window_start
+    out = np.zeros((seq_len, len(bigwigs)), dtype=np.float64)
+    chrom_len = chrom_sizes.get(chrom, int(1e10))
+    safe_end = min(window_end, chrom_len)
+    n_valid = safe_end - window_start
+    if n_valid <= 0:
+        return out
+    for t, bw in enumerate(bigwigs):
+        vals = bw.values(chrom, window_start, safe_end)
+        if vals is None:
+            continue
+        arr = np.array(vals, dtype=np.float64)
+        np.nan_to_num(arr, copy=False, nan=0.0)
+        out[:n_valid, t] = arr
+    return out
+
+
+def accumulator_to_df(
+    acc: ProfileCorrAccumulator,
+    samples: list,
+) -> pd.DataFrame:
+    r = acc.result()
+    rows = []
+    for t_idx, r_val in enumerate(r):
+        sample_idx = t_idx // 2
+        strand = "forward" if t_idx % 2 == 0 else "reverse"
+        rows.append({
+            "track_idx":   t_idx,
+            "track_name":  samples[sample_idx],
+            "strand":      strand,
+            "pearson_r":   float(r_val),
+            "n_positions": int(acc.n[t_idx]),
+        })
+    return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -373,6 +498,12 @@ def main() -> None:
     n_ssu_tracks = len(track_names["splice_usage"])
     n_junc_samples = len(track_names["splice_junctions"]) // 2
     print("  rna_seq tracks={}, ssu_tracks={}, junc_samples={}".format(n_rna_tracks, n_ssu_tracks, n_junc_samples))
+
+    # Profile correlation accumulators (online Pearson r across all test intervals)
+    acc_exon_1bp  = ProfileCorrAccumulator(n_rna_tracks)
+    acc_full_1bp  = ProfileCorrAccumulator(n_rna_tracks)
+    acc_exon_32bp = ProfileCorrAccumulator(n_rna_tracks)
+    acc_full_32bp = ProfileCorrAccumulator(n_rna_tracks)
 
     # Strand-matched (track_idx, bw_idx) per strand:
     # Bigwigs ordered [s0/forward, s0/reverse, s1/forward, s1/reverse, ...]
@@ -443,16 +574,12 @@ def main() -> None:
     # --- Load SSU parquets ---
     print("Loading SSU parquets...")
     assert len(args.ssu_parquets) == len(args.samples)
-    _SSU_VALUE_COLS = ["ssu_spliser", "ssu_full", "ssu_approx"]
     ssu_per_sample: list[pd.DataFrame] = []
     for idx, (path, sid) in enumerate(zip(args.ssu_parquets, args.samples)):
         schema_cols = set(pq.read_schema(path).names)
-        value_col = next((c for c in _SSU_VALUE_COLS if c in schema_cols), None)
-        if value_col is None:
-            raise ValueError("SSU parquet {} has none of {}".format(path, _SSU_VALUE_COLS))
-        df = pd.read_parquet(path, columns=["chrom", "strand", "role", "exon_pos", "alpha_juncs", value_col])
-        if value_col != "ssu_spliser":
-            df = df.rename(columns={value_col: "ssu_spliser"})
+        if "ssu_spliser" not in schema_cols:
+            raise ValueError("SSU parquet {} is missing ssu_spliser column".format(path))
+        df = pd.read_parquet(path, columns=["chrom", "strand", "role", "exon_pos", "alpha_juncs", "ssu_spliser"])
         df = df[df["ssu_spliser"].notna()].reset_index(drop=True)
         df["sample_id"] = sid
         df["sample_idx"] = idx
@@ -482,6 +609,7 @@ def main() -> None:
 
     # --- Inference loop ---
     rna_rows: list[dict] = []
+    rna_rows_32bp: list[dict] = []
     splice_site_rows: list[dict] = []
     ssu_rows: list[dict] = []
     junction_rows: list[dict] = []
@@ -524,9 +652,20 @@ def main() -> None:
 
         # Extract outputs to CPU numpy
         rna_pred = outputs["rna_seq"][1].squeeze(0).cpu().float().numpy()         # (seq_len, n_rna_tracks)
+        # 32 bp binned version: truncate to full bins then mean-pool
+        _n_full_bins = seq_len // 32
+        rna_pred_32bp = rna_pred[:_n_full_bins * 32].reshape(_n_full_bins, 32, -1).mean(axis=1)  # (n_bins, n_rna_tracks)
         cls_probs = outputs["splice_sites_classification"]["probs"].squeeze(0).cpu().float().numpy()  # (seq_len, 5)
         usage_pred = outputs["splice_sites_usage"]["predictions"].squeeze(0).cpu().float().numpy()    # (seq_len, n_ssu_tracks)
         pred_counts = outputs["splice_sites_junction"]["pred_counts"].squeeze(0).cpu().float().numpy()  # (K, K, 2*n_junc_samples)
+
+        # Fetch full-window observed coverage once for profile correlation accumulators
+        obs_window = fetch_obs_window(bigwigs, chrom, window_start, window_end, chrom_sizes)
+        obs_window_32bp = obs_window[:_n_full_bins * 32].reshape(_n_full_bins, 32, -1).mean(axis=1)
+
+        # Full-interval profile correlation
+        acc_full_1bp.update(np.log1p(rna_pred), np.log1p(obs_window))
+        acc_full_32bp.update(np.log1p(rna_pred_32bp), np.log1p(obs_window_32bp))
 
         # Build position→index lookups
         pos_lookup: list[dict[int, int]] = []
@@ -551,9 +690,28 @@ def main() -> None:
                 track_indices = reverse_track_indices
 
             pred_means = get_exon_mean_pred(rna_pred, gene_exons, window_start, seq_len)
+            pred_means_32bp = get_exon_mean_pred_binned(rna_pred_32bp, gene_exons, window_start, seq_len)
             obs_means = get_exon_mean_obs(bigwigs, gene_exons, chrom, chrom_sizes)
             if pred_means is None or obs_means is None:
                 continue
+
+            # Exon-only profile correlation: accumulate position-level pred vs obs
+            for _, ex in gene_exons.iterrows():
+                rel_s = max(0, int(ex["Start"]) - window_start)
+                rel_e = min(seq_len, int(ex["End"]) - window_start)
+                if rel_e <= rel_s:
+                    continue
+                acc_exon_1bp.update(
+                    np.log1p(rna_pred[rel_s:rel_e].astype(np.float64)),
+                    np.log1p(obs_window[rel_s:rel_e]),
+                )
+                bin_s = rel_s // 32
+                bin_e = min(((rel_e - 1) // 32) + 1, _n_full_bins)
+                if bin_e > bin_s:
+                    acc_exon_32bp.update(
+                        np.log1p(rna_pred_32bp[bin_s:bin_e].astype(np.float64)),
+                        np.log1p(obs_window_32bp[bin_s:bin_e]),
+                    )
 
             for t_idx in track_indices:
                 if t_idx >= len(args.bigwigs):
@@ -562,7 +720,7 @@ def main() -> None:
                 # both map to sample index 0,1,2,... via integer division by 2.
                 sample_idx_for_track = t_idx // 2
                 sample_id = args.samples[sample_idx_for_track]
-                rna_rows.append({
+                _row = {
                     "gene_id": gid,
                     "gene_name": g_name,
                     "chrom": chrom,
@@ -570,9 +728,11 @@ def main() -> None:
                     "interval_idx": iv_idx,
                     "track_idx": t_idx,
                     "track_name": sample_id,
-                    "pred_log_mean": float(np.log1p(pred_means[t_idx])),
                     "obs_log_mean": float(np.log1p(obs_means[t_idx])),
-                })
+                }
+                rna_rows.append({**_row, "pred_log_mean": float(np.log1p(pred_means[t_idx]))})
+                if pred_means_32bp is not None:
+                    rna_rows_32bp.append({**_row, "pred_log_mean": float(np.log1p(pred_means_32bp[t_idx]))})
 
         # ── Splice site classification ─────────────────────────────────────
         # Collect every annotated splice site position in this interval.
@@ -740,6 +900,9 @@ def main() -> None:
     pd.DataFrame(rna_rows).to_parquet(
         os.path.join(args.output_dir, "rna_seq_per_gene.parquet"), **kw
     )
+    pd.DataFrame(rna_rows_32bp).to_parquet(
+        os.path.join(args.output_dir, "rna_seq_per_gene_32bp.parquet"), **kw
+    )
     pd.DataFrame(splice_site_rows).to_parquet(
         os.path.join(args.output_dir, "splice_site_scores.parquet"), **kw
     )
@@ -757,16 +920,31 @@ def main() -> None:
     pd.DataFrame(psi_rows).to_parquet(
         os.path.join(args.output_dir, "psi_scores.parquet"), **kw
     )
+    accumulator_to_df(acc_exon_1bp, args.samples).to_parquet(
+        os.path.join(args.output_dir, "rna_seq_profile_corr_exon_1bp.parquet"), **kw
+    )
+    accumulator_to_df(acc_full_1bp, args.samples).to_parquet(
+        os.path.join(args.output_dir, "rna_seq_profile_corr_full_1bp.parquet"), **kw
+    )
+    accumulator_to_df(acc_exon_32bp, args.samples).to_parquet(
+        os.path.join(args.output_dir, "rna_seq_profile_corr_exon_32bp.parquet"), **kw
+    )
+    accumulator_to_df(acc_full_32bp, args.samples).to_parquet(
+        os.path.join(args.output_dir, "rna_seq_profile_corr_full_32bp.parquet"), **kw
+    )
 
     for bw in bigwigs:
         bw.close()
 
     print("\nDone. Outputs written to {}".format(args.output_dir))
-    print("  rna_seq rows: {}".format(len(rna_rows)))
+    print("  rna_seq rows (1bp): {}".format(len(rna_rows)))
+    print("  rna_seq rows (32bp): {}".format(len(rna_rows_32bp)))
     print("  splice_site rows: {}".format(len(splice_site_rows)))
     print("  ssu rows: {}".format(len(ssu_rows)))
     print("  junction rows (pred>0 or obs>0): {}".format(len(junction_rows)))
     print("  psi rows: {}".format(len(psi_rows)))
+    print("  profile corr exon 1bp n_positions: {}".format(int(acc_exon_1bp.n.mean())))
+    print("  profile corr full 1bp n_positions: {}".format(int(acc_full_1bp.n.mean())))
 
 
 if __name__ == "__main__":

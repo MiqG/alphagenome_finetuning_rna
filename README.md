@@ -120,6 +120,16 @@ snakemake -s workflows/07-overfit_ssu/Snakefile --use-conda -j <cores>
 sbatch src/scripts/submit_snakemake_slurm.sh 'snakemake --cluster "sbatch --account=ehpc708 --cpus-per-task={threads} --time={resources.runtime} --partition={resources.partition} --qos={resources.qos} --gres={resources.gres} --parsable" --cluster-status src/scripts/status-sacct.sh --jobs 365 --use-conda -s workflows/07-overfit_ssu/Snakefile --latency-wait 60 --rerun-incomplete --keep-going --rerun-triggers mtime'
 ```
 
+### 8. Finetuning Pangolin
+
+```shell
+# BSC
+sbatch src/scripts/submit_snakemake_slurm.sh 'snakemake --cluster "sbatch --account=ehpc708 --cpus-per-task={threads} --time={resources.runtime} --partition={resources.partition} --qos={resources.qos} --gres={resources.gres} --parsable" --cluster-status src/scripts/status-sacct.sh --jobs 365 --use-conda -s workflows/08-finetune_pangolin/Snakefile --latency-wait 60 --rerun-incomplete --keep-going --rerun-triggers mtime'
+
+# CRG
+sbatch src/scripts/submit_snakemake_slurm.sh 'snakemake --cluster "sbatch --cpus-per-task={threads} --mem={resources.memory}G --time={resources.runtime} --partition={resources.partition} --gres={resources.gres} --parsable" --cluster-status src/scripts/status-sacct.sh --jobs 30 --use-conda -s workflows/08-finetune_pangolin/Snakefile --latency-wait 60 --rerun-incomplete --keep-going --rerun-triggers mtime'
+```
+
 ## Citation
 
 If you use this repository, please cite our blog post (link to be added upon publication) and the original AlphaGenome paper:

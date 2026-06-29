@@ -30,5 +30,5 @@ include: "rules/full.smk"
 
 rule all:
     input:
-        # rules.all_dev.input,
+        rules.all_dev.input,
         rules.all_full.input,

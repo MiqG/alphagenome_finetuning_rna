@@ -87,10 +87,9 @@ rule all_full:
         os.path.join(FULL_OUTPUT_DIR, "summary", "epoch_logs.parquet"),
         expand(
             os.path.join(EVAL_OUTPUT_DIR, "{run_name}", "epoch{epoch}", "{subset}", "metrics.parquet"),
-            zip,
-            run_name=_EVAL_RUN_NAMES,
-            epoch=_EPOCHS,
-            subset=_EVAL_SUBSETS,
+            run_name=list(FULL_RUNS.keys()),
+            epoch=list(range(1, _EPOCHS + 1)),
+            subset=EVAL_SUBSETS,
         ),
 
 
@@ -110,9 +109,9 @@ rule pangolin_full_finetune:
     benchmark:
         os.path.join(FULL_OUTPUT_DIR, "benchmarks", "{run_name}", "finetune.tsv")
     output:
-        checkpoint = os.path.join(
-            FULL_OUTPUT_DIR, "{run_name}",
-            "checkpoint_epoch{}.pth".format(_EPOCHS)
+        checkpoints = expand(
+            os.path.join(FULL_OUTPUT_DIR, "{{run_name}}", "checkpoint_epoch{epoch}.pth"),
+            epoch=list(range(1, _EPOCHS + 1)),
         ),
     params:
         num_gpus        = _full_run("num_gpus"),
@@ -127,10 +126,13 @@ rule pangolin_full_finetune:
         samples         = " ".join(SAMPLES),
     threads: lambda wildcards: FULL_RUNS[wildcards.run_name]["num_gpus"] * 8
     resources:
-        runtime   = int(48 * 60),
-        gres      = _gres,
-        partition = "acc_ehpc",
-        qos       = "acc_ehpc",
+        runtime   = int(24 * 60),
+        # gres      = _gres,
+        # partition = "acc_ehpc",
+        # qos       = "acc_ehpc",
+        memory = 42,
+        gres      = "gpu:3g.47gb:1",
+        partition = "gpu_diasfrazer",
     retries: 1
     conda:
         "alphagenome_pytorch"
@@ -185,8 +187,10 @@ rule pangolin_combine_epoch_logs:
     resources:
         runtime   = int(0.1 * 60),
         gres      = "none",
-        partition = "gpp",
-        qos       = "gp_ehpc",
+        # partition = "gpp",
+        # qos       = "gp_ehpc",
+        memory = 8,
+        partition = "gpu_diasfrazer",
     run:
         import pandas as pd
         dfs = []
@@ -227,9 +231,12 @@ rule pangolin_collect_predictions:
     threads: 8
     resources:
         runtime   = int(4 * 60),
-        gres      = "gpu:1",
-        partition = "acc_ehpc",
-        qos       = "acc_ehpc",
+        # gres      = _gres,
+        # partition = "acc_ehpc",
+        # qos       = "acc_ehpc",
+        memory = 42,
+        gres      = "gpu:3g.47gb:1",
+        partition = "gpu_diasfrazer",
     conda:
         "alphagenome_pytorch"
     shell:
@@ -275,8 +282,10 @@ rule pangolin_compute_metrics:
     resources:
         runtime   = int(30),
         gres      = "none",
-        partition = "gpp",
-        qos       = "gp_ehpc",
+        # partition = "gpp",
+        # qos       = "gp_ehpc",
+        memory = 42,
+        partition = "gpu_diasfrazer",
     conda:
         "alphagenome_pytorch"
     shell:
