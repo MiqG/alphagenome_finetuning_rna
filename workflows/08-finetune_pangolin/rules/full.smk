@@ -80,9 +80,8 @@ def _interval_bed(wildcards):
 rule all_full:
     input:
         expand(
-            os.path.join(FULL_OUTPUT_DIR, "{run_name}", "checkpoint_epoch{epochs}.pth"),
+            os.path.join(FULL_OUTPUT_DIR, "{run_name}", "finetune.done"),
             run_name=list(FULL_RUNS.keys()),
-            epochs=_EPOCHS,
         ),
         os.path.join(FULL_OUTPUT_DIR, "summary", "epoch_logs.parquet"),
         expand(
@@ -106,13 +105,10 @@ rule pangolin_full_finetune:
             os.path.join(DATA_DIR, "STAR", sample, "paper_pass.ssu.parquet")
             for sample in SAMPLES
         ],
+    output:
+        done = touch(os.path.join(FULL_OUTPUT_DIR, "{run_name}", "finetune.done")),
     benchmark:
         os.path.join(FULL_OUTPUT_DIR, "benchmarks", "{run_name}", "finetune.tsv")
-    output:
-        checkpoints = expand(
-            os.path.join(FULL_OUTPUT_DIR, "{{run_name}}", "checkpoint_epoch{epoch}.pth"),
-            epoch=list(range(1, _EPOCHS + 1)),
-        ),
     params:
         num_gpus        = _full_run("num_gpus"),
         mode            = _full_run("mode"),
@@ -177,9 +173,8 @@ rule pangolin_combine_epoch_logs:
         )
     input:
         models = lambda wildcards: expand(
-            os.path.join(FULL_OUTPUT_DIR, "{run_name}", "checkpoint_epoch{epochs}.pth"),
+            os.path.join(FULL_OUTPUT_DIR, "{run_name}", "finetune.done"),
             run_name=list(FULL_RUNS.keys()),
-            epochs=_EPOCHS,
         )
     output:
         combined = os.path.join(FULL_OUTPUT_DIR, "summary", "epoch_logs.parquet")
@@ -212,7 +207,7 @@ rule pangolin_collect_predictions:
         epoch  = r"\d+",
         subset = r"[a-z_]+",
     input:
-        checkpoint   = os.path.join(FULL_OUTPUT_DIR, "{run_name}", "checkpoint_epoch{epoch}.pth"),
+        done         = os.path.join(FULL_OUTPUT_DIR, "{run_name}", "finetune.done"),
         interval_bed = _interval_bed,
         genome       = config["gencode"]["paths"]["fasta"],
         ssu_parquets = _ssu_parquets,
@@ -220,6 +215,10 @@ rule pangolin_collect_predictions:
         ssu         = os.path.join(EVAL_OUTPUT_DIR, "{run_name}", "epoch{epoch}", "{subset}", "predictions", "ssu_scores.parquet"),
         splice_site = os.path.join(EVAL_OUTPUT_DIR, "{run_name}", "epoch{epoch}", "{subset}", "predictions", "splice_site_scores.parquet"),
     params:
+        checkpoint = lambda wildcards: os.path.join(
+            FULL_OUTPUT_DIR, wildcards.run_name,
+            "checkpoint_epoch{}.pth".format(wildcards.epoch)
+        ),
         output_dir = lambda wildcards: os.path.join(
             EVAL_OUTPUT_DIR, wildcards.run_name,
             "epoch{}".format(wildcards.epoch), wildcards.subset, "predictions"
@@ -244,7 +243,7 @@ rule pangolin_collect_predictions:
         set -eo pipefail
 
         python {COLLECT_SCRIPT} \
-            --checkpoint {input.checkpoint} \
+            --checkpoint {params.checkpoint} \
             --test-bed {input.interval_bed} \
             --genome {input.genome} \
             --ssu-parquets {input.ssu_parquets} \

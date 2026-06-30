@@ -64,12 +64,7 @@ def _dev_run(key):
 rule all_dev:
     input:
         expand(
-            os.path.join(DEV_OUTPUT_DIR, "{run_name}", "checkpoint_epoch{epochs}.pth"),
-            run_name=list(DEV_RUNS.keys()),
-            epochs=_DEV_EPOCHS,
-        ),
-        expand(
-            os.path.join(DEV_OUTPUT_DIR, "{run_name}", "epoch_log.csv"),
+            os.path.join(DEV_OUTPUT_DIR, "{run_name}", "finetune.done"),
             run_name=list(DEV_RUNS.keys()),
         ),
         expand(
@@ -93,8 +88,7 @@ rule pangolin_dev_finetune:
             for sample in SAMPLES
         ],
     output:
-        checkpoint = os.path.join(DEV_OUTPUT_DIR, "{run_name}", "checkpoint_epoch{}.pth".format(_DEV_EPOCHS)),
-        log        = os.path.join(DEV_OUTPUT_DIR, "{run_name}", "epoch_log.csv"),
+        done = touch(os.path.join(DEV_OUTPUT_DIR, "{run_name}", "finetune.done")),
     params:
         num_gpus        = _dev_run("num_gpus"),
         mode            = _dev_run("mode"),
@@ -152,7 +146,7 @@ rule pangolin_dev_collect_predictions:
         run_name = "|".join(DEV_RUNS.keys()),
         epoch    = r"\d+",
     input:
-        checkpoint   = os.path.join(DEV_OUTPUT_DIR, "{run_name}", "checkpoint_epoch{epoch}.pth"),
+        done         = os.path.join(DEV_OUTPUT_DIR, "{run_name}", "finetune.done"),
         interval_bed = _DEV_VAL_BED,
         genome       = config["gencode"]["paths"]["fasta"],
         ssu_parquets = [
@@ -163,6 +157,10 @@ rule pangolin_dev_collect_predictions:
         ssu         = os.path.join(DEV_EVAL_OUTPUT_DIR, "{run_name}", "epoch{epoch}", "val", "predictions", "ssu_scores.parquet"),
         splice_site = os.path.join(DEV_EVAL_OUTPUT_DIR, "{run_name}", "epoch{epoch}", "val", "predictions", "splice_site_scores.parquet"),
     params:
+        checkpoint = lambda wildcards: os.path.join(
+            DEV_OUTPUT_DIR, wildcards.run_name,
+            "checkpoint_epoch{}.pth".format(wildcards.epoch)
+        ),
         output_dir = lambda wildcards: os.path.join(
             DEV_EVAL_OUTPUT_DIR, wildcards.run_name,
             "epoch{}".format(wildcards.epoch), "val", "predictions"
@@ -184,7 +182,7 @@ rule pangolin_dev_collect_predictions:
         set -eo pipefail
 
         python {COLLECT_SCRIPT} \
-            --checkpoint {input.checkpoint} \
+            --checkpoint {params.checkpoint} \
             --test-bed {input.interval_bed} \
             --genome {input.genome} \
             --ssu-parquets {input.ssu_parquets} \
