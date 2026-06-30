@@ -360,15 +360,20 @@ def main() -> None:
 
     pred_dir = args.predictions_dir
 
+    def _load(filename):
+        path = os.path.join(pred_dir, filename)
+        if os.path.exists(path):
+            return pd.read_parquet(path)
+        print("  (skipping {}: file not found)".format(filename))
+        return pd.DataFrame()
+
     print("Loading prediction parquets...")
-    rna_df = pd.read_parquet(os.path.join(pred_dir, "rna_seq_per_gene.parquet"))
-    cls_df = pd.read_parquet(os.path.join(pred_dir, "splice_site_scores.parquet"))
-    ssu_df = pd.read_parquet(os.path.join(pred_dir, "ssu_scores.parquet"))
-    junc_df = pd.read_parquet(os.path.join(pred_dir, "junction_scores.parquet"))
-    totals_path = os.path.join(pred_dir, "junction_totals.parquet")
-    totals_df = pd.read_parquet(totals_path) if os.path.exists(totals_path) else pd.DataFrame()
-    psi_path = os.path.join(pred_dir, "psi_scores.parquet")
-    psi_df = pd.read_parquet(psi_path) if os.path.exists(psi_path) else pd.DataFrame()
+    rna_df  = _load("rna_seq_per_gene.parquet")
+    cls_df  = _load("splice_site_scores.parquet")
+    ssu_df  = _load("ssu_scores.parquet")
+    junc_df = _load("junction_scores.parquet")
+    totals_df = _load("junction_totals.parquet")
+    psi_df    = _load("psi_scores.parquet")
 
     print("  rna_seq rows: {}".format(len(rna_df)))
     print("  splice_site rows: {}".format(len(cls_df)))

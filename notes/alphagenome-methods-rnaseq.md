@@ -169,3 +169,47 @@ from the test intervals in chr2 only.
 Together, these three approaches provide a multifaceted assessment of AlphaGenome’s ability to
 accurately predict both the presence and quantitative strength of splice junctions, as well as local splice
 isoform choices.
+
+
+Benchmarking Against Borzoi Track Predictions
+For a direct comparison with the Borzoi fold-1 model2
+, an AlphaGenome model, which was initially
+trained on the identical Borzoi fold-1 data split, underwent fine-tuning. This fine-tuning process involved
+augmenting the AlphaGenome architecture with two additional heads to mirror Borzoi’s outputs.
+The first head aggregates AlphaGenome’s 1 bp embeddings into 32 bp embeddings and makes
+predictions matching the Borzoi tracks (7,611 human and 2,608 mouse). This head is trained on Borzoi’s
+TFRecords dataset (original resolution and scaling) to allow for a direct comparison with the published
+Borzoi model. This head is used for metrics reported in Fig. 1d where we compare against Borzoi at 32
+bp resolution.
+The second RNA-seq head is trained on the same RNA-seq tracks as Borzoi but reprocessed at 1
+bp resolution and without any Borzoi specific scaling. When comparing this head against Borzoi, we
+unscale and repeat Borzoi’s predictions 32 times (to equal 1 bp unscaled predictions). This head is used
+for metrics reported in Fig. 1d where we compare against Borzoi at 1 bp resolution.
+We validated the approach of upsampling and scaling the additional RNA-seq head to match Borzoi by
+applying the same procedure to the training data. AlphaGenome’s base-resolution data was aggregated
+to a 32 bp resolution and Borzoi’s original scaling methodology was applied. Compared to Borzoi’s
+provided TFRecord files, we achieved high concordance (0.988 average Pearson r correlation) . This
+comparison excluded unmappable regions, as flagged by the ‘umap’ entry in the Borzoi data examples.
+Finally, in the Borzoi’s and AlphaGenome’s RNA-seq comparison at 1 bp resolution, we only include
+the tracks for which the Pearson r correlation is larger or equal than 0.99 and exclude the unmappable
+regions.
+
+Correlation for Continuous Tracks
+Concordance between predicted and observed continuous track signals (such as those for ChIP-seq,
+DNase-seq, ATAC-seq, CAGE, and PRO-cap) was primarily measured using the Pearson correlation
+coefficient (r). For a given track and a held-out test interval, Pearson r was calculated between the vector
+of predicted values and the vector of observed values across all corresponding genomic bins within that
+interval. The distributions shown in Fig. 2c represents the Pearson r values calculated for all tracks within
+a specific assay group (e.g., all TF ChIP-seq tracks) and organism (e.g., human and mouse) across all
+held-out test intervals. The average Pearson r for each group (shown as text and circle) is the mean of
+these individual track correlations.
+
+# figures
+
+Extended Data Fig. 2: Splicing track performance.
+
+(a) Schematic overview of splice site (SS) classification, splice site usage (SSU) prediction, and splice junction (SJ) read count prediction tasks. (b) (left) Performance comparison (AUPRC) of SS classification and SJ classification against reference methods. ‘Baseline’ means the fraction of positive splice junctions in the evaluated data. Splice site classification is evaluated with both GTF (GENCODE v46) annotated splice sites only and also splice sites derived from GTEx RNA-seq data (Methods). Splice junction classification discriminates between true splice junctions observed from RNA-seq data versus false junctions not observed from RNA-seq (but where the splice sites are observed). Splice junction classification was evaluated per tissue and then the mean AUPRC across tissues were reported. (right) Performance comparison (Pearson r) of predicted vs. measured SSU and SJ counts (log(1+x) transformed). (c) Scatter plot between predicted and measured donor SSU across seven example human tissues (from GTEx). Pearson r in each tissue is displayed as text. (d) Scatter plot between predicted and measured splice junction counts across seven human tissues (from GTEx). Pearson r in each tissue is displayed as text. (e) Distribution of Pearson correlation coefficients between predicted and measured PSI3 per tissue (left), PSI5 per tissue (middle), and junction counts across tissues (measuring tissue specificity of the splice junction predictions).
+
+Extended Data Fig. 3: Track-level performance benchmarking.
+
+Performance comparison of AlphaGenome with Enformer and Borzoi on held-out genomic track prediction. (a, b) Comparison of AlphaGenome test set performance on Enformer human tracks (each dot is one track) against Enformer models either (a) not fine-tuned or (b) fine-tuned on human data (the main released Enformer version). AlphaGenome model was re-trained for direct comparability using matched training intervals and an additional Enformer prediction head (Methods). (c) Evaluation of RNA-seq prediction performance at base and gene resolution using the same source of RNA-seq data as Borzoi, but processed at base-resolution and not scaled (Methods). Borzoi’s 32 bp RNA-seq predictions were upsampled and unscaled to the original scale for comparison. The larger performance difference observed on the normal scale (first column) likely reflects resolution differences at exon-intron boundaries. This difference decreased when using log(1+x) transformed values (second column), suggesting better agreement on overall gene expression levels. A similar trend was observed when aggregating expression per gene (average exon coverage, third column). Cell-type specificity was evaluated by correlating quantile-normalized, mean-subtracted expression profiles across genes (fourth column) and across tracks (fifth column). (d) Test set performance comparison of AlphaGenome against Borzoi (fold 1) on Borzoi track data at 32 bp resolution (each dot is one track). AlphaGenome was fine-tuned with an additional Borzoi head at matched resolution (Methods). (e) Stratification of cell-type specific prediction accuracy. The per-gene log-fold change correlation performance (from panel c, fourth column) was stratified by gene characteristics: median expression level across tissues (Median TPM; quintile breakpoints: 5.5×10−9, 4.1×10−4, 8.1×10−4, 0.17, 4.1, 3.6×104 TPM), number of tissues with the gene expressed (TPM ≥ 0.001; quintile breakpoints: 9.4×10−8, 9.4×10−4, 8.0, 52, 54, 54 tissues), and housekeeping gene status. Sample sizes in brackets are the number of genes in each category. Box plots display the median (center line), the 25th and 75th percentiles (box bounds), and the whiskers extend to 1.5 times the interquartile range from the box bounds; points beyond whiskers indicate outliers. (f, g) Performance comparison of AlphaGenome against (f) ProCapNet (on PRO-Cap data) and (g) ChromBPNet (on ATAC and DNase). Evaluation was performed on ProCapNet fold 5 and ChromBPNet fold 0 test peak regions, respectively, where regions overlapping with AlphaGenome fold 0 training intervals were excluded. Performance is quantified by track Pearson r, Pearson r on the log total count, and Jensen-Shannon distance (JSD; lower indicates better performance). AlphaGenome outperforms the baselines across all metrics, modalities and cell-lines. For (g), only tracks with matching experiment accessions between AlphaGenome and ChromBPNet training sets were considered.
