@@ -92,6 +92,9 @@ snakemake -s workflows/05-full_finetuning/Snakefile --use-conda -j <cores>
 ```bash
 # SLURM
 sbatch src/scripts/submit_snakemake_slurm.sh 'snakemake --cluster "sbatch --account=ehpc708 --cpus-per-task={threads} --time={resources.runtime} --partition={resources.partition} --qos={resources.qos} --gres={resources.gres} --parsable" --cluster-status src/scripts/status-sacct.sh --jobs 365 --use-conda -s workflows/05-full_finetuning/Snakefile --latency-wait 60 --rerun-incomplete --keep-going --rerun-triggers mtime'
+
+# CRG
+sbatch src/scripts/submit_snakemake_slurm.sh 'snakemake --cluster "sbatch --cpus-per-task={threads} --mem={resources.memory}G --time={resources.runtime} --partition={resources.partition} --gres={resources.gres} --parsable" --cluster-status src/scripts/status-sacct.sh --jobs 30 --use-conda -s workflows/05-full_finetuning/Snakefile --latency-wait 60 --rerun-incomplete --keep-going --rerun-triggers mtime'
 ```
 
 ### 6. Evaluation (`workflows/06-evaluation/Snakefile`)

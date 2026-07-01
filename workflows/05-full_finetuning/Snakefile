@@ -44,27 +44,45 @@ ALL_RUNS = {
     #     "junction_position_source":    "predicted",
     #     "gradient_accumulation_steps": SF3B1_CFG["gradient_accumulation_steps"],
     # },
-    "randinit__newloss__annotated__frozen__multigpu_ddp": {
+    # "randinit__newloss__annotated__frozen__multigpu_ddp": {
+    #     "modality_weights":            "rna_seq:1.0,splice_site:1.0,splice_usage:1.0,splice_junctions:1.0",
+    #     "pretrained_head":             "rna_seq:NA,splice_usage:NA,splice_junctions:NA,splice_site:0",
+    #     "use_gtf":                     False,
+    #     "rope":                        "truncated",
+    #     "junction_loss":               "normalized",
+    #     "mode":                        "linear-probe",
+    #     "junction_position_source":    "annotated",
+    #     "gradient_accumulation_steps": SF3B1_CFG["gradient_accumulation_steps"],
+    #     "min_alpha_juncs":             0,
+    #     "num_gpus":                    _NUM_GPUS,
+    #     "weight_decay":                0,
+    # },
+    # "randinit__newloss__annotated__frozen__multigpu_ddp__alpha5": {
+    #     "modality_weights":            "rna_seq:1.0,splice_site:1.0,splice_usage:1.0,splice_junctions:1.0",
+    #     "pretrained_head":             "rna_seq:NA,splice_usage:NA,splice_junctions:NA,splice_site:0",
+    #     "use_gtf":                     False,
+    #     "rope":                        "truncated",
+    #     "junction_loss":               "normalized",
+    #     "mode":                        "linear-probe",
+    #     "junction_position_source":    "annotated",
+    #     "gradient_accumulation_steps": SF3B1_CFG["gradient_accumulation_steps"],
+    #     "min_alpha_juncs":             5,
+    #     "num_gpus":                    _NUM_GPUS,
+    #     "weight_decay":                0,
+    # },
+    "randinit__newloss__annotated__lora__largegpu": {
         "modality_weights":            "rna_seq:1.0,splice_site:1.0,splice_usage:1.0,splice_junctions:1.0",
         "pretrained_head":             "rna_seq:NA,splice_usage:NA,splice_junctions:NA,splice_site:0",
         "use_gtf":                     False,
         "rope":                        "truncated",
         "junction_loss":               "normalized",
-        "mode":                        "linear-probe",
+        "mode":                        "lora",
         "junction_position_source":    "annotated",
-        "gradient_accumulation_steps": SF3B1_CFG["gradient_accumulation_steps"],
+        "gradient_accumulation_steps": 32,
+        "batch_size":                  1,
         "min_alpha_juncs":             0,
-    },
-    "randinit__newloss__annotated__frozen__multigpu_ddp__alpha5": {
-        "modality_weights":            "rna_seq:1.0,splice_site:1.0,splice_usage:1.0,splice_junctions:1.0",
-        "pretrained_head":             "rna_seq:NA,splice_usage:NA,splice_junctions:NA,splice_site:0",
-        "use_gtf":                     False,
-        "rope":                        "truncated",
-        "junction_loss":               "normalized",
-        "mode":                        "linear-probe",
-        "junction_position_source":    "annotated",
-        "gradient_accumulation_steps": SF3B1_CFG["gradient_accumulation_steps"],
-        "min_alpha_juncs":             5,
+        "num_gpus":                    2,
+        "weight_decay":                0.1,
     },
 }
 
@@ -129,11 +147,28 @@ def _min_alpha_juncs(wildcards):
     return ALL_RUNS[wildcards.run_name].get("min_alpha_juncs", 0)
 
 
+def _weight_decay(wildcards):
+    return ALL_RUNS[wildcards.run_name]["weight_decay"]
+
+
+def _batch_size(wildcards):
+    return ALL_RUNS[wildcards.run_name].get("batch_size", SF3B1_CFG["batch_size"])
+
+
+def _num_gpus(wildcards):
+    return ALL_RUNS[wildcards.run_name]["num_gpus"]
+
+
+def _threads(wildcards):
+    return _num_gpus(wildcards) * 20
+
+
 def _gres(wildcards):
     mode = ALL_RUNS[wildcards.run_name]["mode"]
+    n    = _num_gpus(wildcards)
     if mode == "lora":
-        return "gpu:7g.80gb:{}".format(_NUM_GPUS)
-    return "gpu:{}".format(_NUM_GPUS)
+        return "gpu:7g.80gb:{}".format(n)
+    return "gpu:{}".format(n)
 
 
 # ---------------------------------------------------------------------------
@@ -181,15 +216,15 @@ rule full_finetune:
     output:
         checkpoint = os.path.join(OUTPUT_DIR, "{run_name}", "checkpoint_epoch{}.pth".format(_EPOCHS)),
     params:
-        num_gpus                     = _NUM_GPUS,
+        num_gpus                     = _num_gpus,
         num_workers_per_rank         = 20,
         modality_bigwig              = SF3B1_CFG["modality_bigwig"],
         modality_splicing            = SF3B1_CFG["modality_splicing"],
         sequence_length              = SF3B1_CFG["sequence_length"],
         lr                           = SF3B1_CFG["lr"],
-        weight_decay                 = 0,
+        weight_decay                 = _weight_decay,
         epochs                       = _EPOCHS,
-        batch_size                   = SF3B1_CFG["batch_size"],
+        batch_size                   = _batch_size,
         gradient_accumulation_steps  = _gradient_accumulation_steps,
         min_alpha_juncs              = _min_alpha_juncs,
         track_means_samples          = SF3B1_CFG["track_means_samples"],
@@ -203,12 +238,14 @@ rule full_finetune:
         mode_args                    = _mode_args,
         junction_position_source_arg = _junction_position_source_arg,
         lr_schedule_args             = _lr_schedule_args,
-    threads: _NUM_GPUS * 20
+    threads: 12 # _threads
     resources:
-        runtime   = int(48*60),  # hours in minutes
-        gres      = _gres,
-        partition = "acc_ehpc",
-        qos       = "acc_ehpc"
+        runtime   = int(7*24*60),  # hours in minutes
+        # gres      = _gres,
+        memory = 64,
+        gres = "gpu:h100:2",
+        partition = "gpu_diasfrazer",
+        # qos       = "acc_ehpc"
     conda:
         "alphagenome_pytorch"
     retries: 1
@@ -280,8 +317,10 @@ rule combine_epoch_logs:
     resources:
         runtime   = int(0.1*60),
         gres      = "none",
-        partition = "gpp",
-        qos       = "gp_ehpc"
+        # partition = "gpp",
+        # qos       = "gp_ehpc"
+        memory = 4,
+        partition = "gpu_diasfrazer"
     run:
         import pandas as pd
 
