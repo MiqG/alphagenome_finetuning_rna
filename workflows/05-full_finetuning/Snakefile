@@ -217,7 +217,7 @@ rule full_finetune:
         checkpoint = os.path.join(OUTPUT_DIR, "{run_name}", "checkpoint_epoch{}.pth".format(_EPOCHS)),
     params:
         num_gpus                     = _num_gpus,
-        num_workers_per_rank         = 20,
+        num_workers_per_rank         = 12,
         modality_bigwig              = SF3B1_CFG["modality_bigwig"],
         modality_splicing            = SF3B1_CFG["modality_splicing"],
         sequence_length              = SF3B1_CFG["sequence_length"],
@@ -242,7 +242,7 @@ rule full_finetune:
     resources:
         runtime   = int(7*24*60),  # hours in minutes
         # gres      = _gres,
-        memory = 64,
+        memory = 128,
         gres = "gpu:h100:2",
         partition = "gpu_diasfrazer",
         # qos       = "acc_ehpc"

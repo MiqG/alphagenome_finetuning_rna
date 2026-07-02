@@ -97,6 +97,8 @@ sbatch src/scripts/submit_snakemake_slurm.sh 'snakemake --cluster "sbatch --acco
 sbatch src/scripts/submit_snakemake_slurm.sh 'snakemake --cluster "sbatch --cpus-per-task={threads} --mem={resources.memory}G --time={resources.runtime} --partition={resources.partition} --gres={resources.gres} --parsable" --cluster-status src/scripts/status-sacct.sh --jobs 30 --use-conda -s workflows/05-full_finetuning/Snakefile --latency-wait 60 --rerun-incomplete --keep-going --rerun-triggers mtime'
 ```
 
+- lora notes: ran in two H100s in parallel with DDP, 13 hours per epoch.
+
 ### 6. Evaluation (`workflows/06-evaluation/Snakefile`)
 
 ```bash
