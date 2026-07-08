@@ -315,12 +315,12 @@ rule combine_epoch_logs:
         combined = os.path.join(OUTPUT_DIR, "summary", "epoch_logs.parquet")
     threads: 1
     resources:
-        runtime   = int(0.1*60),
+        runtime = int(0.1*60),
+        memory = 4,
         gres      = "none",
+        partition = "gpu_diasfrazer"
         # partition = "gpp",
         # qos       = "gp_ehpc"
-        memory = 4,
-        partition = "gpu_diasfrazer"
     run:
         import pandas as pd
 

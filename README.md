@@ -108,6 +108,9 @@ snakemake -s workflows/06-evaluation/Snakefile --use-conda -j <cores>
 ```bash
 # SLURM
 sbatch src/scripts/submit_snakemake_slurm.sh 'snakemake --cluster "sbatch --account=ehpc708 --cpus-per-task={threads} --time={resources.runtime} --partition={resources.partition} --qos={resources.qos} --gres={resources.gres} --parsable" --cluster-status src/scripts/status-sacct.sh --jobs 365 --use-conda -s workflows/06-evaluation/Snakefile --latency-wait 60 --rerun-incomplete --keep-going --rerun-triggers mtime'
+
+# CRG
+sbatch src/scripts/submit_snakemake_slurm.sh 'snakemake --cluster "sbatch --cpus-per-task={threads} --mem={resources.memory}G --time={resources.runtime} --partition={resources.partition} --gres={resources.gres} --parsable" --cluster-status src/scripts/status-sacct.sh --jobs 30 --use-conda -s workflows/06-evaluation/Snakefile --latency-wait 60 --rerun-incomplete --keep-going --rerun-triggers mtime'
 ```
 
 Fine-tunes AlphaGenome on the full FOLD_1 train/val split (41,699 train + 6,323 val intervals) using the best configuration from the overfitting experiments: randomly initialized heads, ratio-normalized junction loss, predicted junction positions, frozen trunk, 4-GPU DDP, constant LR (1e-4), 5 epochs, effective batch size 64. Uses `--resume auto` for fault tolerance across SLURM preemptions.

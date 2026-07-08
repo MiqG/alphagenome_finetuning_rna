@@ -244,7 +244,7 @@ rule pangolin_collect_predictions:
         # partition = "acc_ehpc",
         # qos       = "acc_ehpc",
         memory = 42,
-        gres      = "gpu:3g.47gb:1",
+        gres      = "gpu:mig_24gb:1",
         partition = "gpu_diasfrazer",
     conda:
         "alphagenome_pytorch"
