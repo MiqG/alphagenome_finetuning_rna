@@ -134,6 +134,7 @@ rule collect_predictions:
     threads: 20
     resources:
         runtime   = int(12 * 60),
+        account   = "ehpc292",
         gres      = "gpu:1",
         partition = "acc_ehpc",
         qos       = "acc_ehpc",
@@ -189,6 +190,7 @@ rule compute_metrics:
     resources:
         mem_mb    = 16000,
         runtime   = int(30),
+        account   = "ehpc708",
         gres      = "none",
         partition = "gpp",
         qos       = "gp_ehpc",
