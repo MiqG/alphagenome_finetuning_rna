@@ -24,6 +24,14 @@ Reads the four parquets written by collect_predictions.py and computes:
     - PSI5 Pearson r per sample (chr2)
     - PSI3 Pearson r per sample (chr2)
 
+  Profile shape (rna_seq_profile_metrics_per_interval.parquet + rna_seq_track_totals_per_interval.parquet):
+    matching evaluate_finetuned.py's raw-scale, track-pooled definitions, for both the full
+    padded window and the central 196608 bp crop:
+    - Profile Pearson r — per-interval, track-pooled r; mean/median across intervals
+    - Jensen-Shannon divergence — per-interval, track-averaged JSD; mean/median across intervals
+    - Count Pearson r — one Pearson r pooling all (interval, track) total-signal pairs,
+      plus a per-track breakdown
+
 Outputs:
   metrics.json    — flat dict with all scalar metrics
   metrics.parquet — long-format table (metric_group, metric_name, value)
@@ -351,6 +359,68 @@ def compute_psi_metrics(df: pd.DataFrame) -> dict[str, float]:
 
 
 # ---------------------------------------------------------------------------
+# Profile shape metrics (profile Pearson r, count Pearson r, JSD)
+# ---------------------------------------------------------------------------
+
+def compute_profile_shape_metrics(
+    pooled_df: pd.DataFrame,
+    totals_df: pd.DataFrame,
+) -> dict[str, float]:
+    """Raw-scale, track-pooled profile Pearson r / JSD / count Pearson r.
+
+    Matches evaluate_finetuned.py's definitions:
+      - profile Pearson r and JSD are computed per interval (track-pooled), then
+        summarized with mean/median across intervals.
+      - count Pearson r pools all (interval, track) total-signal pairs into a
+        single correlation (plus a per-track breakdown here, which their script
+        doesn't report).
+
+    Reported for both the "full" (whole padded window) and "central" (196608 bp
+    crop) scopes written by collect_predictions.py.
+    """
+    metrics: dict[str, float] = {}
+
+    if not pooled_df.empty:
+        for scope in ("full", "central"):
+            for prefix, col in [
+                ("profile_pearson_r", "profile_pearson_r_{}".format(scope)),
+                ("jsd", "jsd_{}".format(scope)),
+            ]:
+                if col not in pooled_df.columns:
+                    continue
+                vals = pooled_df[col].dropna()
+                if len(vals) == 0:
+                    continue
+                metrics["{}_{}_mean".format(prefix, scope)] = float(vals.mean())
+                metrics["{}_{}_median".format(prefix, scope)] = float(vals.median())
+
+    if not totals_df.empty:
+        for scope in ("full", "central"):
+            pred_col = "pred_sum_{}".format(scope)
+            obs_col = "obs_sum_{}".format(scope)
+            if pred_col not in totals_df.columns:
+                continue
+            sub = totals_df.dropna(subset=[pred_col, obs_col])
+            if sub.empty:
+                continue
+
+            r = safe_pearson(sub[pred_col].values, sub[obs_col].values)
+            if r is not None:
+                metrics["count_pearson_r_{}".format(scope)] = r
+
+            per_track = []
+            for track_name, grp in sub.groupby("track_name"):
+                rt = safe_pearson(grp[pred_col].values, grp[obs_col].values)
+                if rt is not None:
+                    metrics["count_pearson_r_{}_track_{}".format(scope, track_name)] = rt
+                    per_track.append(rt)
+            if per_track:
+                metrics["count_pearson_r_{}_track_mean".format(scope)] = float(np.mean(per_track))
+
+    return metrics
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -374,12 +444,16 @@ def main() -> None:
     junc_df = _load("junction_scores.parquet")
     totals_df = _load("junction_totals.parquet")
     psi_df    = _load("psi_scores.parquet")
+    profile_shape_df  = _load("rna_seq_profile_metrics_per_interval.parquet")
+    track_totals_df   = _load("rna_seq_track_totals_per_interval.parquet")
 
     print("  rna_seq rows: {}".format(len(rna_df)))
     print("  splice_site rows: {}".format(len(cls_df)))
     print("  ssu rows: {}".format(len(ssu_df)))
     print("  junction rows: {}".format(len(junc_df)))
     print("  psi rows: {}".format(len(psi_df)))
+    print("  profile-shape rows: {}".format(len(profile_shape_df)))
+    print("  track-totals rows: {}".format(len(track_totals_df)))
 
     # --- Compute metrics ---
     all_metrics: dict[str, float] = {}
@@ -417,6 +491,9 @@ def main() -> None:
 
     print("Computing PSI Pearson r...")
     all_metrics.update(compute_psi_metrics(psi_df))
+
+    print("Computing profile-shape metrics (profile r, count r, JSD)...")
+    all_metrics.update(compute_profile_shape_metrics(profile_shape_df, track_totals_df))
 
     # --- Write JSON ---
     json_path = os.path.join(args.output_dir, "metrics.json")
@@ -456,6 +533,12 @@ def main() -> None:
     ] + [
         "psi5_pearson_r_mean",
         "psi3_pearson_r_mean",
+        "profile_pearson_r_full_mean",
+        "profile_pearson_r_central_mean",
+        "jsd_full_mean",
+        "jsd_central_mean",
+        "count_pearson_r_full",
+        "count_pearson_r_central",
     ]
     print("\n--- Summary ---")
     for k in summary_keys:

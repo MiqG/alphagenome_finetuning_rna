@@ -37,10 +37,20 @@ SUBSET_BED = {
 # ---------------------------------------------------------------------------
 
 FULL_RUNS = {
-    "annotated__frozen__1gpu": {
-        "mode":            "linear-probe",
+    # "annotated__frozen__1gpu": {
+    #     "mode":            "linear-probe",
+    #     "epochs":          _EPOCHS,
+    #     "lr":              1e-3,
+    #     "warmup_steps":    0,
+    #     "weight_decay":    0,
+    #     "batch_size":      128,
+    #     "min_alpha_juncs": 0,
+    #     "num_gpus":        1,
+    # },
+    "annotated__full__1gpu": {
+        "mode":            "full",
         "epochs":          _EPOCHS,
-        "lr":              1e-3,
+        "lr":              1e-4,
         "warmup_steps":    0,
         "weight_decay":    0,
         "batch_size":      128,
@@ -120,14 +130,14 @@ rule pangolin_full_finetune:
         min_alpha_juncs = _full_run("min_alpha_juncs"),
         output_dir      = FULL_OUTPUT_DIR,
         samples         = " ".join(SAMPLES),
-    threads: lambda wildcards: FULL_RUNS[wildcards.run_name]["num_gpus"] * 8
+    threads: lambda wildcards: FULL_RUNS[wildcards.run_name]["num_gpus"] * 10
     resources:
-        runtime   = int(24 * 60),
+        runtime   = int(7 * 24 * 60),
         # gres      = _gres,
         # partition = "acc_ehpc",
         # qos       = "acc_ehpc",
         memory = 42,
-        gres      = "gpu:3g.47gb:1",
+        gres      = "gpu:mig_24gb:1",
         partition = "gpu_diasfrazer",
     retries: 1
     conda:
@@ -234,7 +244,7 @@ rule pangolin_collect_predictions:
         # partition = "acc_ehpc",
         # qos       = "acc_ehpc",
         memory = 42,
-        gres      = "gpu:3g.47gb:1",
+        gres      = "gpu:mig_24gb:1",
         partition = "gpu_diasfrazer",
     conda:
         "alphagenome_pytorch"

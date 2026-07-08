@@ -10,7 +10,16 @@ prediction parquets consumed by compute_eval_metrics.py:
   rna_seq_profile_corr_exon_1bp.parquet  — per-track Pearson r over exon positions at 1 bp
   rna_seq_profile_corr_full_1bp.parquet  — per-track Pearson r over full test intervals at 1 bp
   rna_seq_profile_corr_exon_32bp.parquet — per-track Pearson r over exon positions, 32 bp bins
+  rna_seq_profile_corr_central_1bp.parquet  — per-track Pearson r over the central 196608 bp, 1 bp
+  rna_seq_profile_corr_central_32bp.parquet — per-track Pearson r over the central 6144 bins, 32 bp
+  rna_seq_profile_corr_per_interval.parquet — per-interval, per-track Pearson r (full window and
+                                              central window, at both 1 bp and 32 bp resolution)
   rna_seq_profile_corr_full_32bp.parquet — per-track Pearson r over full test intervals, 32 bp bins
+  rna_seq_profile_metrics_per_interval.parquet — per-interval, track-pooled raw-scale profile
+                                              Pearson r and Jensen-Shannon divergence (matching
+                                              evaluate_finetuned.py's per-region definitions)
+  rna_seq_track_totals_per_interval.parquet — per-interval, per-track total pred/obs signal
+                                              (raw scale), feeds the pooled count Pearson r
   splice_site_scores.parquet  — per-annotated-position classification probs (all splice site
                                 positions from RNA-seq / GTF; negatives are other annotated
                                 classes, matching the publication's auPRC definition)
@@ -35,6 +44,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import random
 
@@ -51,14 +61,18 @@ from alphagenome_pytorch.extensions.finetuning.star_junctions import (
     normalize_junctions_per_sample,
 )
 from alphagenome_pytorch.extensions.finetuning.transfer import (
+    TransferConfig,
     add_head,
     load_trunk,
+    prepare_for_transfer,
     remove_all_heads,
 )
 from alphagenome_pytorch.utils.sequence import sequence_to_onehot
 
 _EPS = 1e-8
 _MAX_SPLICE_SITES = 512
+_CENTRAL_LENGTH = 196_608
+_CENTRAL_BINS_32BP = _CENTRAL_LENGTH // 32  # 6144
 
 
 def parse_args() -> argparse.Namespace:
@@ -111,6 +125,12 @@ def load_finetuned_model(
     track_names: dict = ckpt["track_names"]
     resolutions: dict = ckpt["resolutions"]
 
+    # Training mode (linear-probe/lora/full) and adapter hyperparameters are not
+    # stored in the checkpoint itself; they live in the run's config.json.
+    run_config_path = os.path.join(os.path.dirname(checkpoint_path), "config.json")
+    with open(run_config_path) as f:
+        run_config = json.load(f)
+
     model = AlphaGenome(dtype_policy=dtype_policy)
     model = load_trunk(model, pretrained_weights, exclude_heads=True)
     model = remove_all_heads(model)
@@ -127,6 +147,25 @@ def load_finetuned_model(
             num_organisms=1,
         )
         add_head(model, modality, head)
+
+    # Reapply the same LoRA/LoCon adapters used during training so the
+    # checkpoint's state_dict keys (e.g. "*.lora_A.weight") line up.
+    adapter_modes = []
+    if run_config.get("mode") == "lora" and run_config.get("lora_rank"):
+        adapter_modes.append("lora")
+    if run_config.get("locon_targets"):
+        adapter_modes.append("locon")
+    if adapter_modes:
+        transfer_config = TransferConfig(
+            mode=adapter_modes,
+            lora_rank=run_config.get("lora_rank") or 8,
+            lora_alpha=run_config.get("lora_alpha") or 16,
+            lora_targets=(run_config.get("lora_targets") or "q_proj,v_proj").split(","),
+            locon_rank=run_config.get("locon_rank") or 4,
+            locon_alpha=run_config.get("locon_alpha") or 1,
+            locon_targets=(run_config.get("locon_targets") or "").split(",") if run_config.get("locon_targets") else [],
+        )
+        model = prepare_for_transfer(model, transfer_config)
 
     model.load_state_dict(ckpt["model_state_dict"])
     model.to(device)
@@ -167,6 +206,18 @@ def pad_interval(start: int, end: int, seq_len: int) -> tuple[int, int]:
     pad = seq_len - (end - start)
     padded_start = max(0, start - pad // 2)
     return padded_start, padded_start + seq_len
+
+
+def centered_window(
+    chrom: str, start: int, end: int, length: int, chrom_sizes: dict[str, int]
+) -> tuple[str, int, int] | None:
+    """Return a `length`-bp window centered on [start, end), or None if out of bounds."""
+    center = (start + end) // 2
+    seq_start = center - length // 2
+    seq_end = seq_start + length
+    if seq_start < 0 or seq_end > chrom_sizes.get(chrom, 0):
+        return None
+    return chrom, seq_start, seq_end
 
 
 def build_annotated_positions(
@@ -428,6 +479,50 @@ class ProfileCorrAccumulator:
             return np.where(den > 0, num / den, np.nan)
 
 
+def pearson_r_per_track(x: np.ndarray, y: np.ndarray) -> np.ndarray:
+    """Per-track Pearson r for a single batch. x, y: (n_positions, n_tracks) float64.
+
+    Returns shape (n_tracks,), NaN where undefined (zero variance or no positions).
+    """
+    if x.shape[0] == 0:
+        return np.full(x.shape[1], np.nan)
+    xc = x - x.mean(axis=0)
+    yc = y - y.mean(axis=0)
+    num = (xc * yc).sum(axis=0)
+    den = np.sqrt((xc ** 2).sum(axis=0) * (yc ** 2).sum(axis=0))
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return np.where(den > 0, num / den, np.nan)
+
+
+def pearson_r_pooled(x: np.ndarray, y: np.ndarray) -> float:
+    """Scalar Pearson r over two arrays of matching shape, flattened together
+    (pools all axes, e.g. positions and tracks, into one correlation)."""
+    xf = x.reshape(-1).astype(np.float64)
+    yf = y.reshape(-1).astype(np.float64)
+    if xf.size == 0:
+        return float("nan")
+    xc = xf - xf.mean()
+    yc = yf - yf.mean()
+    den = np.sqrt((xc ** 2).sum() * (yc ** 2).sum())
+    if den <= 0:
+        return float("nan")
+    return float((xc * yc).sum() / den)
+
+
+def jsd_per_track(pred: np.ndarray, obs: np.ndarray, eps: float = _EPS) -> np.ndarray:
+    """Per-track Jensen-Shannon divergence between position-normalized profiles.
+
+    pred, obs: (n_positions, n_tracks) raw (non-negative) signal. Each track's
+    profile is normalized into a probability distribution over positions.
+    """
+    p = obs / (obs.sum(axis=0, keepdims=True) + eps)
+    q = pred / (pred.sum(axis=0, keepdims=True) + eps)
+    m = 0.5 * (p + q)
+    kl_pm = np.sum(p * np.log((p + eps) / (m + eps)), axis=0)
+    kl_qm = np.sum(q * np.log((q + eps) / (m + eps)), axis=0)
+    return 0.5 * (kl_pm + kl_qm)
+
+
 def fetch_obs_window(
     bigwigs: list,
     chrom: str,
@@ -500,10 +595,12 @@ def main() -> None:
     print("  rna_seq tracks={}, ssu_tracks={}, junc_samples={}".format(n_rna_tracks, n_ssu_tracks, n_junc_samples))
 
     # Profile correlation accumulators (online Pearson r across all test intervals)
-    acc_exon_1bp  = ProfileCorrAccumulator(n_rna_tracks)
-    acc_full_1bp  = ProfileCorrAccumulator(n_rna_tracks)
-    acc_exon_32bp = ProfileCorrAccumulator(n_rna_tracks)
-    acc_full_32bp = ProfileCorrAccumulator(n_rna_tracks)
+    acc_exon_1bp    = ProfileCorrAccumulator(n_rna_tracks)
+    acc_full_1bp    = ProfileCorrAccumulator(n_rna_tracks)
+    acc_exon_32bp   = ProfileCorrAccumulator(n_rna_tracks)
+    acc_full_32bp   = ProfileCorrAccumulator(n_rna_tracks)
+    acc_central_1bp  = ProfileCorrAccumulator(n_rna_tracks)
+    acc_central_32bp = ProfileCorrAccumulator(n_rna_tracks)
 
     # Strand-matched (track_idx, bw_idx) per strand:
     # Bigwigs ordered [s0/forward, s0/reverse, s1/forward, s1/reverse, ...]
@@ -615,6 +712,9 @@ def main() -> None:
     junction_rows: list[dict] = []
     junction_total_rows: list[dict] = []
     psi_rows: list[dict] = []
+    interval_corr_rows: list[dict] = []
+    pooled_profile_metrics_rows: list[dict] = []
+    track_totals_rows: list[dict] = []
 
     for iv_idx, iv_row in test_intervals.iterrows():
         chrom = iv_row["chrom"]
@@ -666,6 +766,112 @@ def main() -> None:
         # Full-interval profile correlation
         acc_full_1bp.update(np.log1p(rna_pred), np.log1p(obs_window))
         acc_full_32bp.update(np.log1p(rna_pred_32bp), np.log1p(obs_window_32bp))
+
+        # Per-interval, per-track correlation (single interval, not pooled across intervals)
+        interval_r_1bp = pearson_r_per_track(np.log1p(rna_pred), np.log1p(obs_window))
+        interval_r_32bp = pearson_r_per_track(np.log1p(rna_pred_32bp), np.log1p(obs_window_32bp))
+
+        # Central-window correlation: restrict to the central _CENTRAL_LENGTH bp of the
+        # interval (matching Borzoi's central output crop), pooled and per-interval.
+        central = centered_window(chrom, iv_start, iv_end, _CENTRAL_LENGTH, chrom_sizes)
+        central_r_1bp = np.full(n_rna_tracks, np.nan)
+        central_r_32bp = np.full(n_rna_tracks, np.nan)
+        n_central_1bp = 0
+        n_central_32bp = 0
+
+        # Raw-scale (non-log1p), track-pooled and per-track metrics matching
+        # evaluate_finetuned.py's profile Pearson r / count Pearson r / JSD.
+        profile_pearson_track_central = np.full(n_rna_tracks, np.nan)
+        jsd_track_central = np.full(n_rna_tracks, np.nan)
+        profile_pearson_pooled_central = float("nan")
+        jsd_pooled_central = float("nan")
+        pred_sum_central = np.full(n_rna_tracks, np.nan)
+        obs_sum_central = np.full(n_rna_tracks, np.nan)
+
+        if central is not None:
+            _, c_start, c_end = central
+            rel_s = c_start - window_start
+            rel_e = c_end - window_start
+            if 0 <= rel_s and rel_e <= seq_len:
+                central_pred_1bp = rna_pred[rel_s:rel_e]
+                central_obs_1bp = obs_window[rel_s:rel_e]
+                central_pred_32bp = central_pred_1bp.reshape(_CENTRAL_BINS_32BP, 32, -1).mean(axis=1)
+                central_obs_32bp = central_obs_1bp.reshape(_CENTRAL_BINS_32BP, 32, -1).mean(axis=1)
+                central_log_pred_1bp = np.log1p(central_pred_1bp)
+                central_log_obs_1bp = np.log1p(central_obs_1bp)
+                central_log_pred_32bp = np.log1p(central_pred_32bp)
+                central_log_obs_32bp = np.log1p(central_obs_32bp)
+                acc_central_1bp.update(central_log_pred_1bp, central_log_obs_1bp)
+                acc_central_32bp.update(central_log_pred_32bp, central_log_obs_32bp)
+                central_r_1bp = pearson_r_per_track(central_log_pred_1bp, central_log_obs_1bp)
+                central_r_32bp = pearson_r_per_track(central_log_pred_32bp, central_log_obs_32bp)
+                n_central_1bp = _CENTRAL_LENGTH
+                n_central_32bp = _CENTRAL_BINS_32BP
+
+                profile_pearson_track_central = pearson_r_per_track(central_pred_1bp, central_obs_1bp)
+                profile_pearson_pooled_central = pearson_r_pooled(central_pred_1bp, central_obs_1bp)
+                jsd_track_central = jsd_per_track(central_pred_1bp, central_obs_1bp)
+                jsd_pooled_central = float(np.nanmean(jsd_track_central))
+                pred_sum_central = central_pred_1bp.sum(axis=0)
+                obs_sum_central = central_obs_1bp.sum(axis=0)
+
+        # Full-window raw-scale metrics (unconditional; the whole padded window)
+        profile_pearson_track_full = pearson_r_per_track(rna_pred, obs_window)
+        profile_pearson_pooled_full = pearson_r_pooled(rna_pred, obs_window)
+        jsd_track_full = jsd_per_track(rna_pred, obs_window)
+        jsd_pooled_full = float(np.nanmean(jsd_track_full))
+        pred_sum_full = rna_pred.sum(axis=0)
+        obs_sum_full = obs_window.sum(axis=0)
+
+        pooled_profile_metrics_rows.append({
+            "interval_idx": int(iv_idx),
+            "chrom": chrom,
+            "start": iv_start,
+            "end": iv_end,
+            "profile_pearson_r_full": float(profile_pearson_pooled_full),
+            "profile_pearson_r_central": float(profile_pearson_pooled_central),
+            "jsd_full": float(jsd_pooled_full),
+            "jsd_central": float(jsd_pooled_central),
+            "n_positions_full": seq_len,
+            "n_positions_central": n_central_1bp,
+        })
+
+        for t_idx in range(n_rna_tracks):
+            sample_idx_for_track = t_idx // 2
+            track_name = args.samples[sample_idx_for_track]
+            strand = "forward" if t_idx % 2 == 0 else "reverse"
+            interval_corr_rows.append({
+                "interval_idx": int(iv_idx),
+                "chrom": chrom,
+                "start": iv_start,
+                "end": iv_end,
+                "track_idx": t_idx,
+                "track_name": track_name,
+                "strand": strand,
+                "pearson_r_1bp": float(interval_r_1bp[t_idx]),
+                "pearson_r_32bp": float(interval_r_32bp[t_idx]),
+                "n_positions_1bp": seq_len,
+                "n_positions_32bp": _n_full_bins,
+                "pearson_r_central_1bp": float(central_r_1bp[t_idx]),
+                "pearson_r_central_32bp": float(central_r_32bp[t_idx]),
+                "n_positions_central_1bp": n_central_1bp,
+                "n_positions_central_32bp": n_central_32bp,
+                "profile_pearson_r_raw_full": float(profile_pearson_track_full[t_idx]),
+                "profile_pearson_r_raw_central": float(profile_pearson_track_central[t_idx]),
+                "jsd_full": float(jsd_track_full[t_idx]),
+                "jsd_central": float(jsd_track_central[t_idx]),
+            })
+            track_totals_rows.append({
+                "interval_idx": int(iv_idx),
+                "chrom": chrom,
+                "track_idx": t_idx,
+                "track_name": track_name,
+                "strand": strand,
+                "pred_sum_full": float(pred_sum_full[t_idx]),
+                "obs_sum_full": float(obs_sum_full[t_idx]),
+                "pred_sum_central": float(pred_sum_central[t_idx]),
+                "obs_sum_central": float(obs_sum_central[t_idx]),
+            })
 
         # Build position→index lookups
         pos_lookup: list[dict[int, int]] = []
@@ -932,6 +1138,21 @@ def main() -> None:
     accumulator_to_df(acc_full_32bp, args.samples).to_parquet(
         os.path.join(args.output_dir, "rna_seq_profile_corr_full_32bp.parquet"), **kw
     )
+    accumulator_to_df(acc_central_1bp, args.samples).to_parquet(
+        os.path.join(args.output_dir, "rna_seq_profile_corr_central_1bp.parquet"), **kw
+    )
+    accumulator_to_df(acc_central_32bp, args.samples).to_parquet(
+        os.path.join(args.output_dir, "rna_seq_profile_corr_central_32bp.parquet"), **kw
+    )
+    pd.DataFrame(interval_corr_rows).to_parquet(
+        os.path.join(args.output_dir, "rna_seq_profile_corr_per_interval.parquet"), **kw
+    )
+    pd.DataFrame(pooled_profile_metrics_rows).to_parquet(
+        os.path.join(args.output_dir, "rna_seq_profile_metrics_per_interval.parquet"), **kw
+    )
+    pd.DataFrame(track_totals_rows).to_parquet(
+        os.path.join(args.output_dir, "rna_seq_track_totals_per_interval.parquet"), **kw
+    )
 
     for bw in bigwigs:
         bw.close()
@@ -943,6 +1164,9 @@ def main() -> None:
     print("  ssu rows: {}".format(len(ssu_rows)))
     print("  junction rows (pred>0 or obs>0): {}".format(len(junction_rows)))
     print("  psi rows: {}".format(len(psi_rows)))
+    print("  per-interval correlation rows: {}".format(len(interval_corr_rows)))
+    print("  pooled profile-metric rows (profile r / JSD): {}".format(len(pooled_profile_metrics_rows)))
+    print("  track-totals rows (for count Pearson r): {}".format(len(track_totals_rows)))
     print("  profile corr exon 1bp n_positions: {}".format(int(acc_exon_1bp.n.mean())))
     print("  profile corr full 1bp n_positions: {}".format(int(acc_full_1bp.n.mean())))
 
