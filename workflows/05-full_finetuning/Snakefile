@@ -70,7 +70,25 @@ ALL_RUNS = {
     #     "num_gpus":                    _NUM_GPUS,
     #     "weight_decay":                0,
     # },
-    "randinit__newloss__annotated__lora__largegpu": {
+    # "randinit__newloss__annotated__lora__largegpu": {
+    #     "modality_weights":            "rna_seq:1.0,splice_site:1.0,splice_usage:1.0,splice_junctions:1.0",
+    #     "pretrained_head":             "rna_seq:NA,splice_usage:NA,splice_junctions:NA,splice_site:0",
+    #     "use_gtf":                     False,
+    #     "rope":                        "truncated",
+    #     "junction_loss":               "normalized",
+    #     "mode":                        "lora",
+    #     "junction_position_source":    "annotated",
+    #     "gradient_accumulation_steps": 32,
+    #     "batch_size":                  1,
+    #     "min_alpha_juncs":             0,
+    #     "num_gpus":                    2,
+    #     "weight_decay":                0.1,
+    # },
+    # Same LoRA setup as above (rank 8, q_proj/v_proj, matched effective batch size), but with
+    # the lr schedule matched to the linear-probe run instead: no warmup, constant lr, no weight
+    # decay. Isolates whether LoRA's slower early-epoch SSU convergence (see paper.ipynb) is an
+    # optimization-schedule artifact rather than a property of LoRA itself.
+    "randinit__newloss__annotated__lora__largegpu__nowarmup": {
         "modality_weights":            "rna_seq:1.0,splice_site:1.0,splice_usage:1.0,splice_junctions:1.0",
         "pretrained_head":             "rna_seq:NA,splice_usage:NA,splice_junctions:NA,splice_site:0",
         "use_gtf":                     False,
@@ -82,7 +100,9 @@ ALL_RUNS = {
         "batch_size":                  1,
         "min_alpha_juncs":             0,
         "num_gpus":                    2,
-        "weight_decay":                0.1,
+        "weight_decay":                0.0,
+        "lr_schedule":                 "constant",
+        "warmup_steps":                0,
     },
 }
 
@@ -134,9 +154,12 @@ def _mode_args(wildcards):
 
 
 def _lr_schedule_args(wildcards):
-    if ALL_RUNS[wildcards.run_name]["mode"] == "lora":
-        return "--warmup-steps {} --lr-schedule cosine".format(SF3B1_CFG["warmup_steps"])
-    return "--warmup-steps 0 --lr-schedule constant"
+    cfg = ALL_RUNS[wildcards.run_name]
+    default_schedule = "cosine" if cfg["mode"] == "lora" else "constant"
+    schedule = cfg.get("lr_schedule", default_schedule)
+    default_warmup = SF3B1_CFG["warmup_steps"] if schedule == "cosine" else 0
+    warmup = cfg.get("warmup_steps", default_warmup)
+    return "--warmup-steps {} --lr-schedule {}".format(warmup, schedule)
 
 
 def _gradient_accumulation_steps(wildcards):

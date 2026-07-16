@@ -31,11 +31,16 @@ def set_figure_style():
     mpl.rcParams['legend.fontsize'] = 6
     mpl.rcParams['legend.title_fontsize'] = 8
 
-    mpl.rcParams['axes.linewidth'] = 1
+    mpl.rcParams['axes.linewidth'] = 0.5
     mpl.rcParams['figure.figsize'] = (2.5, 2.5)
     mpl.rcParams['axes.spines.top'] = False
     mpl.rcParams['axes.spines.right'] = False
-    
+
+    # thin black outlines on bars/patches, matching the thinner axis lines above
+    mpl.rcParams['patch.linewidth'] = 0.5
+    mpl.rcParams['patch.edgecolor'] = 'black'
+    mpl.rcParams['patch.force_edgecolor'] = True
+
     mpl.rcParams['figure.dpi'] = 150
     mpl.rcParams['savefig.dpi'] = 300
     
