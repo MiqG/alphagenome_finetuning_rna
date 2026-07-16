@@ -195,7 +195,7 @@ rule compute_metrics:
         qos       = "gp_ehpc",
         # gres      = "none",
         # partition = "genoa64",
-        # memory = 16,
+        # memory = 64,
     conda:
         "alphagenome_pytorch"
     shell:

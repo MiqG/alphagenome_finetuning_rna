@@ -53,6 +53,7 @@ import pandas as pd
 import pyarrow.parquet as pq
 import pyBigWig
 import pyfaidx
+import pyranges as pr
 import torch
 
 from alphagenome_pytorch import AlphaGenome
@@ -268,6 +269,22 @@ def build_annotated_positions(
 # Gene-interval assignment
 # ---------------------------------------------------------------------------
 
+def merge_gene_exons(exons: pd.DataFrame) -> pd.DataFrame:
+    """Union-merge overlapping exon intervals within each gene.
+
+    Different transcripts of a gene often have overlapping-but-not-identical exon
+    spans (alternative splice sites, retained introns, alternative UTRs). Without
+    this, summing over raw per-transcript exon rows double-counts bases covered by
+    more than one transcript's exon, which biases gene-level means toward
+    constitutive exons and deviates from AlphaGenome's own union-of-exons gene mask.
+    """
+    gr = pr.PyRanges(exons[["Chromosome", "Start", "End", "Strand", "gene_id"]])
+    merged = gr.merge(strand=True, by="gene_id").df
+    gene_name = exons.drop_duplicates("gene_id").set_index("gene_id")["gene_name"]
+    merged["gene_name"] = merged["gene_id"].map(gene_name)
+    return merged
+
+
 def compute_gene_interval_map(
     exons: pd.DataFrame,
     test_intervals: pd.DataFrame,
@@ -376,15 +393,25 @@ def get_exon_mean_obs(
     exon_rows: pd.DataFrame,
     chrom: str,
     chrom_sizes: dict[str, int],
+    window_start: int,
+    seq_len: int,
 ) -> np.ndarray | None:
-    """Mean observed bigwig coverage over all exon positions, per track."""
+    """Mean observed bigwig coverage over all exon positions, per track.
+
+    Clipped to the same [window_start, window_start + seq_len) model window as
+    get_exon_mean_pred, so genes only partially covered by the window (allowed by
+    compute_gene_interval_map's >=50% criterion) are compared over the same set of
+    bases on both sides rather than obs pulling in out-of-window bp that pred never sees.
+    """
     n_tracks = len(bigwigs)
     sums = np.zeros(n_tracks, dtype=np.float64)
     count = 0
+    window_end = window_start + seq_len
     for _, ex in exon_rows.iterrows():
         ex_start, ex_end = int(ex["Start"]), int(ex["End"])
         chrom_len = chrom_sizes.get(chrom, int(1e10))
-        ex_end = min(ex_end, chrom_len)
+        ex_start = max(ex_start, window_start)
+        ex_end = min(ex_end, chrom_len, window_end)
         if ex_end <= ex_start:
             continue
         for t, bw in enumerate(bigwigs):
@@ -633,6 +660,7 @@ def main() -> None:
         .drop_duplicates()
         .reset_index(drop=True)
     )
+    exons = merge_gene_exons(exons)
     exons_by_gene: dict[str, pd.DataFrame] = {
         gid: df for gid, df in exons.groupby("gene_id")
     }
@@ -897,7 +925,7 @@ def main() -> None:
 
             pred_means = get_exon_mean_pred(rna_pred, gene_exons, window_start, seq_len)
             pred_means_32bp = get_exon_mean_pred_binned(rna_pred_32bp, gene_exons, window_start, seq_len)
-            obs_means = get_exon_mean_obs(bigwigs, gene_exons, chrom, chrom_sizes)
+            obs_means = get_exon_mean_obs(bigwigs, gene_exons, chrom, chrom_sizes, window_start, seq_len)
             if pred_means is None or obs_means is None:
                 continue
 
