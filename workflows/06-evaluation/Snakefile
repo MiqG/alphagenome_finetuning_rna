@@ -47,10 +47,10 @@ SUBSET_BED = {
 
 # Map run_name -> list of epochs to evaluate
 ALL_RUNS = {
-    # "randinit__newloss__annotated__frozen__multigpu_ddp": [1, 2, 3, 4, 5, 10],#, 15, 20],
+    "randinit__newloss__annotated__frozen__multigpu_ddp": [1, 2, 3, 4, 5, 10],#, 15, 20],
     # "randinit__newloss__annotated__frozen__multigpu_ddp__alpha5": [1, 2, 3, 4, 5, 10]#, 15, 20],
     # "randinit__newloss__predicted__frozen__multigpu_ddp": [5, 10, 15, 20],
-    "randinit__newloss__annotated__lora__largegpu": [1, 2, 3, 4, 5, 10]
+    # "randinit__newloss__annotated__lora__largegpu": [1, 2, 3, 4, 5, 10]
 }
 
 # Flat (run_name, epoch, subset) triples used by expand()
@@ -132,16 +132,16 @@ rule collect_predictions:
         sequence_length = config["finetuning"]["alphagenome"]["sf3b1mut"]["sequence_length"],
     benchmark:
         os.path.join(OUTPUT_DIR, "benchmarks", "{run_name}", "epoch{epoch}", "{subset}", "collect_predictions.tsv")
-    threads: 12
+    threads: 20
     resources:
         runtime   = int(12 * 60),
-        partition = "gpu_diasfrazer",
-        gres = "gpu:h100:1",
-        memory = 128,
-        # account   = "ehpc292",
-        # gres      = "gpu:1",
-        # partition = "acc_ehpc",
-        # qos       = "acc_ehpc",
+        # partition = "gpu_diasfrazer",
+        # gres = "gpu:h100:1",
+        # memory = 128,
+        account   = "ehpc708",
+        gres      = "gpu:1",
+        partition = "acc_ehpc",
+        qos       = "acc_ehpc",
     conda:
         "alphagenome_pytorch"
     shell:
@@ -189,13 +189,13 @@ rule compute_metrics:
     threads: 32
     resources:
         runtime   = int(30),
-        # account   = "ehpc708",
-        # gres      = "none",
-        # partition = "gpp",
-        # qos       = "gp_ehpc",
+        account   = "ehpc708",
         gres      = "none",
-        partition = "genoa64",
-        memory = 16,
+        partition = "gpp",
+        qos       = "gp_ehpc",
+        # gres      = "none",
+        # partition = "genoa64",
+        # memory = 16,
     conda:
         "alphagenome_pytorch"
     shell:
