@@ -660,6 +660,9 @@ def main() -> None:
         .drop_duplicates()
         .reset_index(drop=True)
     )
+    # pr.read_gtf() stores Strand as a fixed 3-category dtype (".", "-", "+"),
+    # which pyranges treats as unstranded even when "." never occurs.
+    exons["Strand"] = exons["Strand"].astype(str)
     exons = merge_gene_exons(exons)
     exons_by_gene: dict[str, pd.DataFrame] = {
         gid: df for gid, df in exons.groupby("gene_id")
