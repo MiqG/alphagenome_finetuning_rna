@@ -1,0 +1,22 @@
+"""
+Workflow 09 — Submission: precompute the metrics tables consumed by figures/paper.ipynb.
+
+figures/paper.ipynb builds three figures (gene expression, splice site usage,
+splice junctions), each requiring heavy groupby/merge/Pearson-r computation
+over the raw prediction parquets from workflow 06 (AlphaGenome) and workflow 08
+(Pangolin) -- most expensive being the junction dedup (~112M rows per run).
+This workflow runs that work once and writes compact long-format parquets to
+results/paper/, so the notebook only has to read three small files and plot.
+
+Run with:
+    snakemake -s workflows/09-submission/Snakefile --use-conda [-n]
+"""
+
+configfile: "config/config.yaml"
+
+include: "rules/paper.smk"
+
+
+rule all:
+    input:
+        rules.all_paper.input,
