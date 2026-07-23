@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-A Snakemake-based genomics pipeline organized as three numbered workflows that download and align SF3B1-mutant RNA-seq data (MEC1 cell line) and develop/validate fine-tuning of AlphaGenome-PyTorch on splicing modalities.
+A Snakemake-based genomics pipeline organized as five numbered workflows that download and align SF3B1-mutant RNA-seq data (MEC1 cell line) and develop/validate fine-tuning of AlphaGenome-PyTorch on splicing modalities: from raw data through single-interval overfitting debugging to full FOLD_1 fine-tuning and held-out evaluation (linear-probe vs. LoRA; no Pangolin comparison in this scope).
 
 ## Running the Workflows
 
@@ -14,6 +14,8 @@ Each workflow is independent and has its own Snakefile:
 snakemake -s workflows/01-obtain_data/Snakefile --use-conda -j <cores>
 snakemake -s workflows/02-preprocess_data/Snakefile --use-conda -j <cores>
 snakemake -s workflows/03-overfitting_single/Snakefile --use-conda -j <cores>
+snakemake -s workflows/05-full_finetuning/Snakefile --use-conda -j <cores>
+snakemake -s workflows/06-evaluation/Snakefile --use-conda -j <cores>
 ```
 
 ### SLURM cluster submission
@@ -30,7 +32,7 @@ All paths, URLs, and parameters are centralized in `config/config.yaml`, organiz
 - `rnaseq.sf3b1mut` — metadata TSV and raw data path for SF3B1 RNA-seq
 - `alphagenome_pytorch` — Hugging Face weights repo and local path
 - `finetuning.alphagenome` — finetune script path, fold BED dirs, sequences_bed_url, and `sf3b1mut` hyperparameters
-- `preprocessing.overfitting` — sample list, fold, and output dirs for single interval selection
+- `preprocessing.overfitting` — sample list, fold, output dirs for single interval selection, and `dev.seed` (used by `train_sample.bed` generation)
 
 ## Architecture
 
@@ -48,9 +50,13 @@ workflows/
       sf3b1mut.smk     — full RNA-seq processing pipeline (see below); defines SAMPLES and STRANDS
       comparison_ssu.smk — validates compute_ssu.py and get_star_junctions.py against SpliSER/STAR on chr1
   02-preprocess_data/
-    Snakefile          — selects single genomic intervals for overfitting experiments
+    Snakefile          — selects single genomic intervals for overfitting experiments; also generates train_sample.bed (seeded sample of FOLD_1 train.bed, same size as test.bed)
   03-overfitting_single/
     Snakefile          — single-interval overfitting (500 epochs, 1 GPU); three experiment groups
+  05-full_finetuning/
+    Snakefile          — full FOLD_1 fine-tuning (10 epochs); two runs: frozen-trunk linear-probe (4-GPU DDP) and LoRA (2 GPU, constant LR/no warmup)
+  06-evaluation/
+    Snakefile          — evaluates both fine-tuned models per saved epoch on test.bed and train_sample.bed; runs collect_predictions.py then compute_eval_metrics.py
   rules/
     models/
       alphagenome.smk  — AlphaGenome LoRA finetuning rule (finetune_sf3b1mut) for monolithic use
@@ -74,11 +80,16 @@ workflows/
 6. Mapped read counting via pysam
 7. Gene expression matrix merging across samples
 
-### AlphaGenome finetuning (workflow 03)
-- Workflow 03 defines its own run matrix and calls `torchrun` directly
+### AlphaGenome finetuning (workflows 03, 05)
+- Each workflow defines its own run matrix and calls `torchrun` directly
 - Script path set via `FINETUNE_SCRIPT` from `config["finetuning"]["alphagenome"]["finetune_script"]`, pointing to `src/alphagenome-pytorch/scripts/finetune.py`
 - Script is copied to a tmp file before launch to avoid NFS issues under torchrun
 - Key flags: `--mode` (linear-probe or lora), `--rope-init` (zeros or truncated_normal), `--junction-loss` (original, normalized, sparse), `--junction-position-source` (annotated or predicted), `--pretrained-head-samples`
+- Workflow 03 runs single-interval debugging ablations; workflow 05 runs the two full FOLD_1 runs (linear-probe, LoRA) evaluated by workflow 06
+
+### AlphaGenome evaluation (workflow 06)
+- `collect_predictions.py` — single-GPU inference on an interval BED (test.bed or train_sample.bed); writes per-gene RNA-seq, splice site, splice site usage, and splice junction prediction parquets
+- `compute_eval_metrics.py` — computes Pearson r / average-precision metrics from those parquets (`--min-junction-counts` filters low-count junctions)
 
 ## Conda environments
 
@@ -87,7 +98,7 @@ Defined in `envs/`. All `conda:` directives in rule files use bare env names (e.
 | File | Env name | Used for |
 |------|----------|----------|
 | `general.yaml` | `alphagenome_finetuning_rna` | RNA-seq processing (STAR, sambamba, samtools, deeptools, pysam, pyranges) |
-| `alphagenome_pytorch.yaml` | `alphagenome_pytorch` | AlphaGenome weight download and finetuning (PyTorch, alphagenome-pytorch[finetuning], hf CLI) |
+| `alphagenome_pytorch.yaml` | `alphagenome_pytorch` | AlphaGenome weight download, finetuning, and evaluation (PyTorch, alphagenome-pytorch[finetuning], hf CLI, pyranges, scikit-learn) |
 | `spliser.yaml` | `spliser` | SpliSER-based SSU validation |
 
 ## External dependencies

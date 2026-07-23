@@ -61,6 +61,8 @@ preprocessing:
     single:
       output_dir: "data/prep/overfitting/single"
       densities: ["high", "medium", "low"]
+    dev:
+      seed: 42
 
 examples:
   alphagenome:

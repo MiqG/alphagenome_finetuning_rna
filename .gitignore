@@ -8,6 +8,9 @@ notebooks/figures/*/*/*
 src/qtlmap
 src/MotifDiff
 src/outlier_analysis
+src/Pangolin
+src/Pangolin_train
+src/custom-pangolin
 *.nextflow*
 .DS_Store
 *ipynb_checkpoints*
@@ -23,3 +26,4 @@ Rplots.pdf
 slurm-*
 *wandb*
 ._*
+*.pdf

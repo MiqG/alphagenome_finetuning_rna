@@ -1,0 +1,322 @@
+"""
+Full finetuning workflow: fine-tune AlphaGenome on the full FOLD_1 train/val split.
+
+Depends on outputs from 01-obtain_data (genome, weights) and the AlphaGenome
+fold BEDs at data/prep/finetuning/alphagenome/FOLD_1/train.bed and valid.bed.
+
+Two runs, both randinit with normalized junction loss and annotated junction
+positions: a frozen-trunk linear-probe (4-GPU DDP) and a LoRA fine-tune
+(rank 8, q_proj/v_proj, 2 GPU, constant LR / no warmup). Hyperparameters
+(lr, epochs, batch size) taken from config; per-run overrides (GPU count,
+LR schedule, LoRA settings) are set per entry in ALL_RUNS below.
+
+Resource requests (gres/partition below) are placeholders for a single
+generic GPU node — adjust to your own cluster.
+
+Run with:
+    snakemake -s workflows/05-full_finetuning/Snakefile --use-conda [-n]
+"""
+
+import os
+
+configfile: "config/config.yaml"
+
+DATA_DIR        = config["rnaseq"]["sf3b1mut"]["path"]
+FINETUNE_SCRIPT = config["finetuning"]["alphagenome"]["finetune_script"]
+FOLDS_DIR       = config["finetuning"]["alphagenome"]["folds_dir"]
+FOLD            = config["preprocessing"]["overfitting"]["fold"]
+OUTPUT_DIR      = "results/finetuning/alphagenome_pytorch/full"
+
+SAMPLES        = config["preprocessing"]["overfitting"]["samples"]
+BIGWIG_STRANDS = ["forward", "reverse"]
+
+SF3B1_CFG = config["finetuning"]["alphagenome"]["sf3b1mut"]
+
+# ---------------------------------------------------------------------------
+# Two runs: frozen-trunk linear-probe (4-GPU DDP) and LoRA (2 GPU)
+# ---------------------------------------------------------------------------
+
+_NUM_GPUS = 4
+
+ALL_RUNS = {
+    "randinit__newloss__annotated__frozen__multigpu_ddp": {
+        "modality_weights":            "rna_seq:1.0,splice_site:1.0,splice_usage:1.0,splice_junctions:1.0",
+        "pretrained_head":             "rna_seq:NA,splice_usage:NA,splice_junctions:NA,splice_site:0",
+        "use_gtf":                     False,
+        "rope":                        "truncated",
+        "junction_loss":               "normalized",
+        "mode":                        "linear-probe",
+        "junction_position_source":    "annotated",
+        "gradient_accumulation_steps": SF3B1_CFG["gradient_accumulation_steps"],
+        "min_alpha_juncs":             0,
+        "num_gpus":                    _NUM_GPUS,
+        "weight_decay":                0,
+    },
+    # LoRA (rank 8, q_proj/v_proj), with the LR schedule matched to the linear-probe run:
+    # no warmup, constant LR, no weight decay.
+    "randinit__newloss__annotated__lora__largegpu__nowarmup": {
+        "modality_weights":            "rna_seq:1.0,splice_site:1.0,splice_usage:1.0,splice_junctions:1.0",
+        "pretrained_head":             "rna_seq:NA,splice_usage:NA,splice_junctions:NA,splice_site:0",
+        "use_gtf":                     False,
+        "rope":                        "truncated",
+        "junction_loss":               "normalized",
+        "mode":                        "lora",
+        "junction_position_source":    "annotated",
+        "gradient_accumulation_steps": 32,
+        "batch_size":                  1,
+        "min_alpha_juncs":             0,
+        "num_gpus":                    2,
+        "weight_decay":                0.0,
+        "lr_schedule":                 "constant",
+        "warmup_steps":                0,
+    },
+}
+
+print(list(ALL_RUNS.keys()))
+
+
+# ---------------------------------------------------------------------------
+# Parameter helper functions
+# ---------------------------------------------------------------------------
+
+def _modality_weights(wildcards):
+    return ALL_RUNS[wildcards.run_name]["modality_weights"]
+
+
+def _pretrained_head_samples(wildcards):
+    return ALL_RUNS[wildcards.run_name]["pretrained_head"]
+
+
+def _gtf_arg(wildcards, input):
+    if ALL_RUNS[wildcards.run_name]["use_gtf"]:
+        return "--gtf {}".format(input.gtf_parquet)
+    return ""
+
+
+def _rope_arg(wildcards):
+    if ALL_RUNS[wildcards.run_name]["rope"] == "truncated":
+        return "--rope-init truncated_normal"
+    return "--rope-init zeros"
+
+
+def _junction_loss_arg(wildcards):
+    return "--junction-loss {}".format(ALL_RUNS[wildcards.run_name]["junction_loss"])
+
+
+def _junction_position_source_arg(wildcards):
+    src = ALL_RUNS[wildcards.run_name]["junction_position_source"]
+    return "--junction-position-source {}".format(src)
+
+
+def _mode_args(wildcards):
+    mode = ALL_RUNS[wildcards.run_name]["mode"]
+    if mode == "lora":
+        return (
+            "--mode lora"
+            " --lora-rank 8 --lora-alpha 16"
+            " --lora-targets q_proj,v_proj"
+        )
+    return "--mode linear-probe"
+
+
+def _lr_schedule_args(wildcards):
+    cfg = ALL_RUNS[wildcards.run_name]
+    default_schedule = "cosine" if cfg["mode"] == "lora" else "constant"
+    schedule = cfg.get("lr_schedule", default_schedule)
+    default_warmup = SF3B1_CFG["warmup_steps"] if schedule == "cosine" else 0
+    warmup = cfg.get("warmup_steps", default_warmup)
+    return "--warmup-steps {} --lr-schedule {}".format(warmup, schedule)
+
+
+def _gradient_accumulation_steps(wildcards):
+    return ALL_RUNS[wildcards.run_name]["gradient_accumulation_steps"]
+
+
+def _min_alpha_juncs(wildcards):
+    return ALL_RUNS[wildcards.run_name].get("min_alpha_juncs", 0)
+
+
+def _weight_decay(wildcards):
+    return ALL_RUNS[wildcards.run_name]["weight_decay"]
+
+
+def _batch_size(wildcards):
+    return ALL_RUNS[wildcards.run_name].get("batch_size", SF3B1_CFG["batch_size"])
+
+
+def _num_gpus(wildcards):
+    return ALL_RUNS[wildcards.run_name]["num_gpus"]
+
+
+def _threads(wildcards):
+    return _num_gpus(wildcards) * 20
+
+
+def _gres(wildcards):
+    mode = ALL_RUNS[wildcards.run_name]["mode"]
+    n    = _num_gpus(wildcards)
+    if mode == "lora":
+        return "gpu:7g.80gb:{}".format(n)
+    return "gpu:{}".format(n)
+
+
+# ---------------------------------------------------------------------------
+# Rules
+# ---------------------------------------------------------------------------
+
+_EPOCHS = 10 #SF3B1_CFG["epochs"]
+
+rule all:
+    input:
+        expand(
+            os.path.join(OUTPUT_DIR, "{run_name}", "checkpoint_epoch{epochs}.pth"),
+            run_name=list(ALL_RUNS.keys()),
+            epochs=_EPOCHS,
+        ),
+        os.path.join(OUTPUT_DIR, "summary", "epoch_logs.parquet"),
+
+
+rule full_finetune:
+    """Fine-tune AlphaGenome on the full FOLD_1 train/val split."""
+    wildcard_constraints:
+        run_name = "|".join(ALL_RUNS.keys()),
+    input:
+        weights        = config["alphagenome_pytorch"]["paths"]["weights"],
+        genome         = config["gencode"]["paths"]["fasta"],
+        gtf_parquet    = config["gencode"]["paths"]["gtf_parquet"],
+        train_bed      = os.path.join(FOLDS_DIR, FOLD, "train.bed"),
+        val_bed        = os.path.join(FOLDS_DIR, FOLD, "valid.bed"),
+        bigwigs        = [
+            os.path.join(DATA_DIR, "STAR", sample,
+                         "paper_pass.Aligned.sortedByCoord.out.filtered." + strand + ".bw")
+            for sample in SAMPLES
+            for strand in BIGWIG_STRANDS
+        ],
+        star_junctions = [
+            os.path.join(DATA_DIR, "STAR", sample, "paper_pass.SJ.out.tab")
+            for sample in SAMPLES
+        ],
+        ssu_parquets = [
+            os.path.join(DATA_DIR, "STAR", sample, "paper_pass.ssu.parquet")
+            for sample in SAMPLES
+        ],
+    benchmark:
+        os.path.join(OUTPUT_DIR, "benchmarks", "{run_name}", "full_finetune.tsv")
+    output:
+        checkpoint = os.path.join(OUTPUT_DIR, "{run_name}", "checkpoint_epoch{}.pth".format(_EPOCHS)),
+    params:
+        num_gpus                     = _num_gpus,
+        num_workers_per_rank         = 12,
+        modality_bigwig              = SF3B1_CFG["modality_bigwig"],
+        modality_splicing            = SF3B1_CFG["modality_splicing"],
+        sequence_length              = SF3B1_CFG["sequence_length"],
+        lr                           = SF3B1_CFG["lr"],
+        weight_decay                 = _weight_decay,
+        epochs                       = _EPOCHS,
+        batch_size                   = _batch_size,
+        gradient_accumulation_steps  = _gradient_accumulation_steps,
+        min_alpha_juncs              = _min_alpha_juncs,
+        track_means_samples          = SF3B1_CFG["track_means_samples"],
+        save_every_steps             = SF3B1_CFG["save_every_steps"],
+        output_dir                   = OUTPUT_DIR,
+        modality_weights             = _modality_weights,
+        pretrained_head_samples      = _pretrained_head_samples,
+        gtf_arg                      = _gtf_arg,
+        rope_arg                     = _rope_arg,
+        junction_loss_arg            = _junction_loss_arg,
+        mode_args                    = _mode_args,
+        junction_position_source_arg = _junction_position_source_arg,
+        lr_schedule_args             = _lr_schedule_args,
+    threads: _threads
+    resources:
+        runtime   = int(7*24*60),  # hours in minutes
+        gres      = _gres,
+        memory    = 128,
+        partition = "gpu_diasfrazer",  # adjust to your cluster
+    conda:
+        "alphagenome_pytorch"
+    retries: 1
+    shell:
+        """
+        set -eo pipefail
+        export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+        FINETUNE_SCRIPT=$(mktemp /tmp/finetune_XXXXXX.py)
+        cp {FINETUNE_SCRIPT} "$FINETUNE_SCRIPT"
+
+        MASTER_PORT=$(python -c "import socket; s=socket.socket(); s.bind(('',0)); print(s.getsockname()[1]); s.close()")
+
+        torchrun --nproc_per_node={params.num_gpus} --master_port "$MASTER_PORT" "$FINETUNE_SCRIPT" \
+            --num-workers {params.num_workers_per_rank} \
+            {params.mode_args} \
+            --modality-weights "{params.modality_weights}" \
+            --genome {input.genome} \
+            --modality {params.modality_bigwig} --bigwig {input.bigwigs} \
+            --modality {params.modality_splicing} --star-junctions {input.star_junctions} --ssu {input.ssu_parquets} \
+            --train-bed {input.train_bed} \
+            --val-bed {input.val_bed} \
+            --pretrained-weights {input.weights} \
+            --gradient-checkpointing \
+            --resume auto \
+            --lr {params.lr} \
+            {params.lr_schedule_args} \
+            --weight-decay {params.weight_decay} \
+            --batch-size {params.batch_size} \
+            --gradient-accumulation-steps {params.gradient_accumulation_steps} \
+            --epochs {params.epochs} \
+            --output-dir {params.output_dir} \
+            --sequence-length {params.sequence_length} \
+            --track-means-samples {params.track_means_samples} \
+            --save-every-steps {params.save_every_steps} \
+            --no-val-pearson \
+            --run-name {wildcards.run_name} \
+            --max-grad-norm 1.0 \
+            --seed 1234 \
+            --pretrained-head-samples "{params.pretrained_head_samples}" --organism human \
+            {params.gtf_arg} \
+            {params.rope_arg} \
+            {params.junction_loss_arg} \
+            {params.junction_position_source_arg} \
+            --min-alpha-juncs {params.min_alpha_juncs}
+
+        rm -f "$FINETUNE_SCRIPT"
+        
+        
+        echo "Done!"
+        """
+
+
+rule combine_epoch_logs:
+    params:
+        logs = lambda wildcards: expand(
+            os.path.join(OUTPUT_DIR, "{run_name}", "epoch_log.csv"),
+            run_name=list(ALL_RUNS.keys()),
+        )
+    input:
+        models = lambda wildcards: expand(
+            os.path.join(OUTPUT_DIR, "{run_name}", "checkpoint_epoch{epochs}.pth"),
+            run_name=list(ALL_RUNS.keys()),
+            epochs=_EPOCHS,
+        )
+    output:
+        combined = os.path.join(OUTPUT_DIR, "summary", "epoch_logs.parquet")
+    threads: 1
+    resources:
+        runtime   = int(0.1*60),
+        memory    = 4,
+        gres      = "none",
+        partition = "gpu_diasfrazer",  # adjust to your cluster
+    run:
+        import pandas as pd
+
+        combined = pd.concat([
+            (
+                pd.read_csv(f)
+                .assign(run_name=os.path.basename(os.path.dirname(f)))
+            )
+            for f in params.logs
+        ])
+
+        combined.to_parquet(output.combined, index=False, compression="zstd")
+
+        print("Done!")

@@ -1,0 +1,201 @@
+"""
+Workflow 06 — Evaluation of finetuned AlphaGenome models on FOLD_1 test set.
+
+For each (run, epoch, subset) triple in ALL_RUNS x EVAL_SUBSETS, runs:
+  1. collect_predictions  — single-GPU inference on <subset>.bed
+  2. compute_metrics      — computes all paper metrics from the parquets
+
+Subsets:
+  test          — held-out test intervals (6,359 intervals)
+  train_sample  — seeded random sample of train intervals, same size as test
+                  (seed=42; generated once by scripts/sample_train_bed.py)
+
+Checkpoint resolved as:
+  results/finetuning/alphagenome_pytorch/full/{run_name}/checkpoint_epoch{epoch}.pth
+
+Outputs:
+  results/evaluation/alphagenome_pytorch/full/{run_name}/epoch{epoch}/{subset}/predictions/*.parquet
+  results/evaluation/alphagenome_pytorch/full/{run_name}/epoch{epoch}/{subset}/metrics.parquet
+
+Run with:
+    snakemake -s workflows/06-evaluation/Snakefile --use-conda [-n]
+"""
+
+import os
+
+configfile: "config/config.yaml"
+
+DATA_DIR        = config["rnaseq"]["sf3b1mut"]["path"]
+FINETUNE_DIR    = "results/finetuning/alphagenome_pytorch/full"
+OUTPUT_DIR      = "results/evaluation/alphagenome_pytorch/full"
+FOLDS_DIR       = config["finetuning"]["alphagenome"]["folds_dir"]
+FOLD            = config["preprocessing"]["overfitting"]["fold"]
+SAMPLES         = config["preprocessing"]["overfitting"]["samples"]
+BIGWIG_STRANDS  = ["forward", "reverse"]
+
+COLLECT_SCRIPT  = "src/scripts/collect_predictions.py"
+METRICS_SCRIPT  = "src/scripts/compute_eval_metrics.py"
+
+# Subsets to evaluate: test (held-out) + train_sample (overfitting check)
+EVAL_SUBSETS = ["test", "train_sample"]
+
+# Map subset -> BED file
+SUBSET_BED = {
+    "test":         os.path.join(FOLDS_DIR, FOLD, "test.bed"),
+    "train_sample": os.path.join(FOLDS_DIR, FOLD, "train_sample.bed"),
+}
+
+# Map run_name -> list of epochs to evaluate
+ALL_RUNS = {
+    "randinit__newloss__annotated__frozen__multigpu_ddp":       [1, 2, 3, 4, 5, 10],
+    "randinit__newloss__annotated__lora__largegpu__nowarmup":   [1, 2, 3, 4, 5, 10],
+}
+
+# Flat (run_name, epoch, subset) triples used by expand()
+_RUN_NAMES = [r for r, epochs in ALL_RUNS.items() for e in epochs for s in EVAL_SUBSETS]
+_EPOCHS    = [e for r, epochs in ALL_RUNS.items() for e in epochs for s in EVAL_SUBSETS]
+_SUBSETS   = [s for r, epochs in ALL_RUNS.items() for e in epochs for s in EVAL_SUBSETS]
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _bigwigs(wildcards):
+    return [
+        os.path.join(DATA_DIR, "STAR", sample,
+                     "paper_pass.Aligned.sortedByCoord.out.filtered.{}.bw".format(strand))
+        for sample in SAMPLES
+        for strand in BIGWIG_STRANDS
+    ]
+
+
+def _ssu_parquets(wildcards):
+    return [
+        os.path.join(DATA_DIR, "STAR", sample, "paper_pass.ssu.parquet")
+        for sample in SAMPLES
+    ]
+
+
+def _star_junctions(wildcards):
+    return [
+        os.path.join(DATA_DIR, "STAR", sample, "paper_pass.SJ.out.tab")
+        for sample in SAMPLES
+    ]
+
+
+def _interval_bed(wildcards):
+    return SUBSET_BED[wildcards.subset]
+
+
+# ---------------------------------------------------------------------------
+# Rules
+# ---------------------------------------------------------------------------
+
+rule all:
+    input:
+        expand(
+            os.path.join(OUTPUT_DIR, "{run_name}", "epoch{epoch}", "{subset}", "metrics.parquet"),
+            zip,
+            run_name=_RUN_NAMES,
+            epoch=_EPOCHS,
+            subset=_SUBSETS,
+        ),
+
+
+rule collect_predictions:
+    """Single-GPU inference on interval BED — writes prediction parquets."""
+    wildcard_constraints:
+        epoch  = r"\d+",
+        subset = r"[a-z_]+",
+    input:
+        checkpoint       = os.path.join(FINETUNE_DIR, "{run_name}", "checkpoint_epoch{epoch}.pth"),
+        pretrained       = config["alphagenome_pytorch"]["paths"]["weights"],
+        interval_bed     = _interval_bed,
+        genome           = config["gencode"]["paths"]["fasta"],
+        gtf_parquet      = config["gencode"]["paths"]["gtf_parquet"],
+        bigwigs          = _bigwigs,
+        ssu_parquets     = _ssu_parquets,
+        star_junctions   = _star_junctions,
+    output:
+        rna_seq          = os.path.join(OUTPUT_DIR, "{run_name}", "epoch{epoch}", "{subset}", "predictions", "rna_seq_per_gene.parquet"),
+        splice_site      = os.path.join(OUTPUT_DIR, "{run_name}", "epoch{epoch}", "{subset}", "predictions", "splice_site_scores.parquet"),
+        ssu              = os.path.join(OUTPUT_DIR, "{run_name}", "epoch{epoch}", "{subset}", "predictions", "ssu_scores.parquet"),
+        junctions        = os.path.join(OUTPUT_DIR, "{run_name}", "epoch{epoch}", "{subset}", "predictions", "junction_scores.parquet"),
+        psi              = os.path.join(OUTPUT_DIR, "{run_name}", "epoch{epoch}", "{subset}", "predictions", "psi_scores.parquet"),
+        junction_totals  = os.path.join(OUTPUT_DIR, "{run_name}", "epoch{epoch}", "{subset}", "predictions", "junction_totals.parquet"),
+    params:
+        output_dir      = lambda wildcards: os.path.join(OUTPUT_DIR, wildcards.run_name, "epoch{}".format(wildcards.epoch), wildcards.subset, "predictions"),
+        samples         = " ".join(SAMPLES),
+        sequence_length = config["finetuning"]["alphagenome"]["sf3b1mut"]["sequence_length"],
+    benchmark:
+        os.path.join(OUTPUT_DIR, "benchmarks", "{run_name}", "epoch{epoch}", "{subset}", "collect_predictions.tsv")
+    threads: 20
+    resources:
+        runtime   = int(12 * 60),
+        partition = "gpu_diasfrazer",  # adjust to your cluster
+        gres      = "gpu:h100:1",
+        memory    = 128,
+    conda:
+        "alphagenome_pytorch"
+    shell:
+        """
+        set -eo pipefail
+
+        python {COLLECT_SCRIPT} \
+            --pretrained-weights {input.pretrained} \
+            --checkpoint {input.checkpoint} \
+            --test-bed {input.interval_bed} \
+            --genome {input.genome} \
+            --gtf-parquet {input.gtf_parquet} \
+            --bigwigs {input.bigwigs} \
+            --ssu-parquets {input.ssu_parquets} \
+            --star-junctions {input.star_junctions} \
+            --samples {params.samples} \
+            --sequence-length {params.sequence_length} \
+            --dtype bfloat16 \
+            --output-dir {params.output_dir}
+
+        echo "Done collecting predictions for {wildcards.run_name} epoch {wildcards.epoch} subset {wildcards.subset}"
+        """
+
+
+rule compute_metrics:
+    """Compute all evaluation metrics from prediction parquets."""
+    wildcard_constraints:
+        epoch  = r"\d+",
+        subset = r"[a-z_]+",
+    input:
+        rna_seq         = os.path.join(OUTPUT_DIR, "{run_name}", "epoch{epoch}", "{subset}", "predictions", "rna_seq_per_gene.parquet"),
+        splice_site     = os.path.join(OUTPUT_DIR, "{run_name}", "epoch{epoch}", "{subset}", "predictions", "splice_site_scores.parquet"),
+        ssu             = os.path.join(OUTPUT_DIR, "{run_name}", "epoch{epoch}", "{subset}", "predictions", "ssu_scores.parquet"),
+        junctions       = os.path.join(OUTPUT_DIR, "{run_name}", "epoch{epoch}", "{subset}", "predictions", "junction_scores.parquet"),
+        psi             = os.path.join(OUTPUT_DIR, "{run_name}", "epoch{epoch}", "{subset}", "predictions", "psi_scores.parquet"),
+        junction_totals = os.path.join(OUTPUT_DIR, "{run_name}", "epoch{epoch}", "{subset}", "predictions", "junction_totals.parquet"),
+    output:
+        metrics_json    = os.path.join(OUTPUT_DIR, "{run_name}", "epoch{epoch}", "{subset}", "metrics.json"),
+        metrics_parquet = os.path.join(OUTPUT_DIR, "{run_name}", "epoch{epoch}", "{subset}", "metrics.parquet"),
+    params:
+        predictions_dir = lambda wildcards: os.path.join(OUTPUT_DIR, wildcards.run_name, "epoch{}".format(wildcards.epoch), wildcards.subset, "predictions"),
+        output_dir      = lambda wildcards: os.path.join(OUTPUT_DIR, wildcards.run_name, "epoch{}".format(wildcards.epoch), wildcards.subset),
+    benchmark:
+        os.path.join(OUTPUT_DIR, "benchmarks", "{run_name}", "epoch{epoch}", "{subset}", "compute_metrics.tsv")
+    threads: 32
+    resources:
+        runtime   = int(0.5 * 60),
+        gres      = "none",
+        partition = "genoa64",  # adjust to your cluster
+        memory    = 64,
+    conda:
+        "alphagenome_pytorch"
+    shell:
+        """
+        set -eo pipefail
+
+        python {METRICS_SCRIPT} \
+            --predictions-dir {params.predictions_dir} \
+            --output-dir {params.output_dir} \
+            --min-junction-counts 5
+
+        echo "Done computing metrics for {wildcards.run_name} epoch {wildcards.epoch} subset {wildcards.subset}"
+        """

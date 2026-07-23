@@ -7,6 +7,8 @@ files), and writes:
 
   single intervals  — one BED per density tier (high / medium / low)
                       used by 03-overfitting_single
+  train_sample.bed  — seeded random sample of FOLD train.bed, same size as
+                      test.bed, used by 06-evaluation as an overfitting check
 
 Run with:
     snakemake -s workflows/02-preprocess_data/Snakefile --use-conda [-n]
@@ -19,6 +21,7 @@ configfile: "config/config.yaml"
 PREP_CFG  = config["preprocessing"]["overfitting"]
 FOLDS_DIR = config["finetuning"]["alphagenome"]["folds_dir"]
 DATA_DIR  = config["rnaseq"]["sf3b1mut"]["path"]
+DEV_SEED  = PREP_CFG["dev"]["seed"]
 
 SAMPLES    = PREP_CFG["samples"]
 FOLD       = PREP_CFG["fold"]
@@ -41,6 +44,7 @@ rule all:
         os.path.join(SINGLE_DIR, "interval_ranking.tsv.gz"),
         expand(os.path.join(SINGLE_DIR, "{density}.bed"), density=DENSITIES),
         expand(os.path.join(SINGLE_DIR, "{density}", "{f}"), density=DENSITIES, f=_FWD_OUTPUTS),
+        os.path.join(FOLDS_DIR, FOLD, "train_sample.bed"),
 
 
 rule rank_intervals:
@@ -86,6 +90,27 @@ rule select_single_intervals:
             --star-junctions {input.star_junctions} \
             --density {params.density} \
             --output {output.bed}
+        """
+
+
+rule sample_train_intervals:
+    """Random sample of FOLD train.bed matching test.bed size (overfitting check)."""
+    input:
+        train = os.path.join(FOLDS_DIR, FOLD, "train.bed"),
+        test  = os.path.join(FOLDS_DIR, FOLD, "test.bed"),
+    output:
+        bed   = os.path.join(FOLDS_DIR, FOLD, "train_sample.bed"),
+    params:
+        script = "src/scripts/sample_train_bed.py",
+        seed   = DEV_SEED,
+    conda:
+        "alphagenome_finetuning_rna"
+    shell:
+        """
+        python {params.script} \
+            --folds-dir {FOLDS_DIR} \
+            --fold {FOLD} \
+            --seed {params.seed}
         """
 
 
