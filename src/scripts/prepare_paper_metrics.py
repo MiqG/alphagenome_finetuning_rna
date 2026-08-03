@@ -93,6 +93,45 @@ def safe_pearson(x: np.ndarray, y: np.ndarray, min_n: int = 3) -> float | None:
     return float(r)
 
 
+N_BOOT = 100
+CI_PCTS = (5, 95)
+
+
+def bootstrap_pearson_ci(x: np.ndarray, y: np.ndarray, n_boot: int = N_BOOT,
+                          ci_pcts: tuple[float, float] = CI_PCTS, seed: int = 0) -> tuple[float, float] | None:
+    """5/95 percentile CI for Pearson r, resampling (x, y) pairs with replacement."""
+    mask = np.isfinite(x) & np.isfinite(y)
+    x, y = x[mask], y[mask]
+    n = len(x)
+    if n < 3:
+        return None
+    rng = np.random.default_rng(seed)
+    idx = np.arange(n)
+    boot_rs = np.empty(n_boot)
+    for b in range(n_boot):
+        samp = rng.choice(idx, size=n, replace=True)
+        boot_rs[b] = stats.pearsonr(x[samp], y[samp])[0]
+    lo, hi = np.percentile(boot_rs, ci_pcts)
+    return float(lo), float(hi)
+
+
+def bootstrap_mean_ci(values: np.ndarray, n_boot: int = N_BOOT,
+                       ci_pcts: tuple[float, float] = CI_PCTS, seed: int = 0) -> tuple[float, float] | None:
+    """5/95 percentile CI for the mean of `values`, resampling with replacement.
+
+    Used when only a pre-reduced per-unit statistic survives upstream (e.g. one
+    Pearson r per interval) rather than the raw paired observations.
+    """
+    values = np.asarray(values)
+    n = len(values)
+    if n < 3:
+        return None
+    rng = np.random.default_rng(seed)
+    boot_means = np.array([rng.choice(values, size=n, replace=True).mean() for _ in range(n_boot)])
+    lo, hi = np.percentile(boot_means, ci_pcts)
+    return float(lo), float(hi)
+
+
 # ---------------------------------------------------------------------------
 # Figure 1 — gene expression
 # ---------------------------------------------------------------------------
@@ -101,14 +140,21 @@ def per_gene_pearson_rows(rna_df: pd.DataFrame, resolution_label: str) -> list[d
     rows = []
     for sample_id, sample_label in SAMPLE_LABELS.items():
         sub = rna_df[rna_df["track_name"] == sample_id].dropna(subset=["pred_log_mean", "obs_log_mean"])
-        r = safe_pearson(sub["obs_log_mean"].values, sub["pred_log_mean"].values)
+        obs, pred = sub["obs_log_mean"].values, sub["pred_log_mean"].values
+        r = safe_pearson(obs, pred)
         if r is None:
             continue
-        rows.append({"sample": sample_label, "pearson_r": r, "n": len(sub), "resolution": resolution_label})
+        ci = bootstrap_pearson_ci(obs, pred)
+        row = {"sample": sample_label, "pearson_r": r, "n": len(sub), "resolution": resolution_label}
+        row["ci_lo"], row["ci_hi"] = ci if ci is not None else (None, None)
+        rows.append(row)
     return rows
 
 
 def profile_corr_rows(pred_dir: str, scope: str, resolution_label: str) -> list[dict]:
+    """Pooled accumulated Pearson r -- only sufficient statistics survive upstream
+    (ProfileCorrAccumulator), so no raw pairs or per-unit r's exist to resample;
+    no bootstrap CI here."""
     fpath = os.path.join(pred_dir, "rna_seq_profile_corr_{}_{}.parquet".format(scope, resolution_label))
     df = pd.read_parquet(fpath)
     rows = []
@@ -119,6 +165,8 @@ def profile_corr_rows(pred_dir: str, scope: str, resolution_label: str) -> list[
             "pearson_r": float(sub["pearson_r"].mean()),
             "n": int(sub["n_positions"].sum()),
             "resolution": resolution_label,
+            "ci_lo": None,
+            "ci_hi": None,
         })
     return rows
 
@@ -131,11 +179,16 @@ def profile_corr_rows_per_interval(pred_dir: str, resolution_label: str) -> list
     for track_name, sub in df.groupby("track_name"):
         sample_label = SAMPLE_LABELS.get(track_name, track_name)
         valid = sub[col].dropna()
+        # Only per-interval r's survive upstream, not raw per-position pairs, so
+        # the bootstrap resamples interval-level r's rather than raw positions.
+        ci = bootstrap_mean_ci(valid.values)
         rows.append({
             "sample": sample_label,
             "pearson_r": float(valid.mean()),
             "n": int(len(valid)),
             "resolution": resolution_label,
+            "ci_lo": ci[0] if ci is not None else None,
+            "ci_hi": ci[1] if ci is not None else None,
         })
     return rows
 
@@ -234,10 +287,14 @@ def ssu_pearson_rows(df: pd.DataFrame, model_name: str) -> list[dict]:
     rows = []
     for sample_id, sample_label in SAMPLE_LABELS.items():
         grp = df[df["sample_id"] == sample_id].dropna(subset=["pred_ssu", "obs_ssu"])
-        r = safe_pearson(grp["pred_ssu"].values, grp["obs_ssu"].values)
+        pred, obs = grp["pred_ssu"].values, grp["obs_ssu"].values
+        r = safe_pearson(pred, obs)
         if r is None:
             continue
-        rows.append({"sample": sample_label, "pearson_r": r, "n": len(grp), "model": model_name})
+        ci = bootstrap_pearson_ci(pred, obs)
+        row = {"sample": sample_label, "pearson_r": r, "n": len(grp), "model": model_name}
+        row["ci_lo"], row["ci_hi"] = ci if ci is not None else (None, None)
+        rows.append(row)
     return rows
 
 
@@ -321,10 +378,14 @@ def junction_pearson_rows(df: pd.DataFrame, model_name: str) -> list[dict]:
     rows = []
     for sample_id, sample_label in SAMPLE_LABELS.items():
         grp = df[(df["sample_id"] == sample_id) & (df["obs_count"] > 0)]
-        r = safe_pearson(np.log1p(grp["pred_count"].values), np.log1p(grp["obs_count"].values))
+        pred, obs = np.log1p(grp["pred_count"].values), np.log1p(grp["obs_count"].values)
+        r = safe_pearson(pred, obs)
         if r is None:
             continue
-        rows.append({"sample": sample_label, "pearson_r": r, "n": len(grp), "model": model_name})
+        ci = bootstrap_pearson_ci(pred, obs)
+        row = {"sample": sample_label, "pearson_r": r, "n": len(grp), "model": model_name}
+        row["ci_lo"], row["ci_hi"] = ci if ci is not None else (None, None)
+        rows.append(row)
     return rows
 
 
