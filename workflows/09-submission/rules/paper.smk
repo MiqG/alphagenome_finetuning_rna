@@ -8,7 +8,7 @@ in figures/paper.ipynb -- keep the two in sync when the comparison changes
 
 import os
 
-PREPARE_SCRIPT = "src/scripts/prepare_paper_metrics.py"
+PREPARE_SCRIPT = "workflows/09-submission/scripts/prepare_paper_metrics.py"
 PAPER_OUTPUT_DIR = "results/paper"
 
 AG_PROBING_EVAL_DIR = os.path.join("results", "bsc", "evaluation", "alphagenome_pytorch", "full")
@@ -24,6 +24,10 @@ PANGOLIN_EPOCH       = 5
 
 EPOCH  = 10
 SUBSET = "test"
+
+TEST_BED        = os.path.join(config["finetuning"]["alphagenome"]["folds_dir"],
+                                config["preprocessing"]["overfitting"]["fold"], "test.bed")
+SEQUENCE_LENGTH = config["finetuning"]["alphagenome"]["sf3b1mut"]["sequence_length"]
 
 
 def _ag_pred_dir(eval_dir, run_name):
@@ -73,12 +77,13 @@ rule prepare_gene_expr_metrics:
 
 
 rule prepare_ssu_metrics:
-    """Splice site usage: common sites across AlphaGenome + Pangolin, general/WT-specific/K700E-specific."""
+    """Splice site usage: common sites across AlphaGenome + Pangolin, general/shared/WT-specific/K700E-specific."""
     input:
         ag_probing_ssu = os.path.join(_ag_pred_dir(AG_PROBING_EVAL_DIR, AG_PROBING_RUN), "ssu_scores.parquet"),
         ag_lora_ssu    = os.path.join(_ag_pred_dir(AG_LORA_EVAL_DIR, AG_LORA_RUN), "ssu_scores.parquet"),
         pg_probing_ssu = os.path.join(PANGOLIN_EVAL_DIR, PANGOLIN_PROBING_RUN, "epoch{}".format(PANGOLIN_EPOCH), SUBSET, "predictions", "ssu_scores.parquet"),
         pg_full_ssu    = os.path.join(PANGOLIN_EVAL_DIR, PANGOLIN_FULL_RUN, "epoch{}".format(PANGOLIN_EPOCH), SUBSET, "predictions", "ssu_scores.parquet"),
+        test_bed       = TEST_BED,
     output:
         metrics = os.path.join(PAPER_OUTPUT_DIR, "ssu_metrics.parquet"),
     benchmark:
@@ -107,6 +112,8 @@ rule prepare_ssu_metrics:
             --pangolin-epoch {PANGOLIN_EPOCH} \
             --epoch {EPOCH} \
             --subset {SUBSET} \
+            --test-bed {TEST_BED} \
+            --sequence-length {SEQUENCE_LENGTH} \
             --output {output.metrics}
 
         echo "Done preparing SSU metrics"
@@ -114,10 +121,11 @@ rule prepare_ssu_metrics:
 
 
 rule prepare_junction_metrics:
-    """Splice junction counts: AlphaGenome only, general/WT-specific/K700E-specific."""
+    """Splice junction counts: AlphaGenome only, general/shared/WT-specific/K700E-specific."""
     input:
         ag_probing_junc = os.path.join(_ag_pred_dir(AG_PROBING_EVAL_DIR, AG_PROBING_RUN), "junction_scores.parquet"),
         ag_lora_junc    = os.path.join(_ag_pred_dir(AG_LORA_EVAL_DIR, AG_LORA_RUN), "junction_scores.parquet"),
+        test_bed        = TEST_BED,
     output:
         metrics = os.path.join(PAPER_OUTPUT_DIR, "junc_metrics.parquet"),
     benchmark:
@@ -142,6 +150,8 @@ rule prepare_junction_metrics:
             --ag-lora-run {AG_LORA_RUN} \
             --epoch {EPOCH} \
             --subset {SUBSET} \
+            --test-bed {TEST_BED} \
+            --sequence-length {SEQUENCE_LENGTH} \
             --output {output.metrics}
 
         echo "Done preparing junction metrics"

@@ -4,20 +4,27 @@ Precompute the heavy per-figure metrics tables used by figures/paper.ipynb.
 
 The notebook's data-prep cells (gene expression, splice site usage, splice
 junctions) each re-run large groupby/merge/Pearson computations -- most
-expensive being the junction dedup (~112M rows per run). This script runs
-that work once per figure and writes a compact long-format parquet that the
-notebook can just load.
+expensive being the junction duplicate-window selection (~112M rows per run).
+This script runs that work once per figure and writes a compact long-format
+parquet that the notebook can just load.
+
+SSU sites/junctions covered by more than one (overlapping) test interval get
+one prediction row per covering window; rather than mean-aggregating these,
+we keep the single prediction from the window that best centers the
+site/junction (max distance to both window edges) -- see
+select_max_context_ssu_rows / select_max_context_junction_rows.
 
 Three figures, selected with --figure:
   gene_expr  -- AlphaGenome probing vs LoRA, 1bp/32bp, three settings
                 (profile per-interval / profile accumulated / gene mean exonic)
   ssu        -- AlphaGenome (probing/LoRA) + Pangolin (probing/full), common
-                sites only, three settings (general / WT-specific / K700E-specific)
-  junctions  -- AlphaGenome (probing/LoRA) only, three settings (general /
-                WT-specific / K700E-specific)
+                sites only, four settings (general / shared / WT-specific /
+                K700E-specific)
+  junctions  -- AlphaGenome (probing/LoRA) only, four settings (general /
+                shared / WT-specific / K700E-specific)
 
 Usage:
-    python src/scripts/prepare_paper_metrics.py --figure gene_expr \\
+    python workflows/09-submission/scripts/prepare_paper_metrics.py --figure gene_expr \\
         --ag-probing-eval-dir results/bsc/evaluation/alphagenome_pytorch/full \\
         --ag-probing-run randinit__newloss__annotated__frozen__multigpu_ddp \\
         --ag-lora-eval-dir results/evaluation/alphagenome_pytorch/full \\
@@ -67,6 +74,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--pangolin-probing-run")
     p.add_argument("--pangolin-full-run")
     p.add_argument("--pangolin-epoch", type=int, default=5)
+
+    p.add_argument("--test-bed", default="data/prep/finetuning/alphagenome/FOLD_1/test.bed",
+                    help="Evaluation interval BED -- row order is the `interval_idx` used by "
+                         "collect_predictions.py, needed to pick the best-centered duplicate "
+                         "prediction per site/junction (see select_max_context_* below).")
+    p.add_argument("--sequence-length", type=int, default=1_048_576,
+                    help="Must match collect_predictions.py's --sequence-length for this run.")
     return p.parse_args()
 
 
@@ -94,12 +108,12 @@ def safe_pearson(x: np.ndarray, y: np.ndarray, min_n: int = 3) -> float | None:
 
 
 N_BOOT = 100
-CI_PCTS = (5, 95)
+CI_PCTS = (2.5, 97.5)
 
 
 def bootstrap_pearson_ci(x: np.ndarray, y: np.ndarray, n_boot: int = N_BOOT,
                           ci_pcts: tuple[float, float] = CI_PCTS, seed: int = 0) -> tuple[float, float] | None:
-    """5/95 percentile CI for Pearson r, resampling (x, y) pairs with replacement."""
+    """2.5/97.5 percentile (95%) CI for Pearson r, resampling (x, y) pairs with replacement."""
     mask = np.isfinite(x) & np.isfinite(y)
     x, y = x[mask], y[mask]
     n = len(x)
@@ -117,7 +131,7 @@ def bootstrap_pearson_ci(x: np.ndarray, y: np.ndarray, n_boot: int = N_BOOT,
 
 def bootstrap_mean_ci(values: np.ndarray, n_boot: int = N_BOOT,
                        ci_pcts: tuple[float, float] = CI_PCTS, seed: int = 0) -> tuple[float, float] | None:
-    """5/95 percentile CI for the mean of `values`, resampling with replacement.
+    """2.5/97.5 percentile (95%) CI for the mean of `values`, resampling with replacement.
 
     Used when only a pre-reduced per-unit statistic survives upstream (e.g. one
     Pearson r per interval) rather than the raw paired observations.
@@ -130,6 +144,138 @@ def bootstrap_mean_ci(values: np.ndarray, n_boot: int = N_BOOT,
     boot_means = np.array([rng.choice(values, size=n, replace=True).mean() for _ in range(n_boot)])
     lo, hi = np.percentile(boot_means, ci_pcts)
     return float(lo), float(hi)
+
+
+# ---------------------------------------------------------------------------
+# Shared: max-context-window selection for SSU/junction duplicates
+# ---------------------------------------------------------------------------
+#
+# SSU sites and junctions falling inside more than one (overlapping) test
+# interval get one prediction row per covering window, and predictions differ
+# slightly across windows (context-dependent). Rather than mean-aggregating
+# these duplicates, we keep the single prediction from the window that best
+# centers the site/junction (max distance to both window edges), since
+# predictions near a window's edge are the most context-starved.
+
+
+def pad_interval(start: int, end: int, seq_len: int) -> tuple[int, int]:
+    """Mirrors collect_predictions.py's pad_interval -- must stay in sync."""
+    if end - start >= seq_len:
+        center = (start + end) // 2
+        return max(0, center - seq_len // 2), center - seq_len // 2 + seq_len
+    pad = seq_len - (end - start)
+    padded_start = max(0, start - pad // 2)
+    return padded_start, padded_start + seq_len
+
+
+def load_test_windows(test_bed: str, sequence_length: int) -> pd.DataFrame:
+    """Load the evaluation interval BED with each window's padded bounds.
+
+    `iv_idx` is the 0-based row order in the BED file, which is the same
+    order collect_predictions.py's `test_intervals.iterrows()` processes
+    intervals in -- i.e. the `interval_idx` in junction_scores.parquet, and
+    (implicitly, since it has no such column) the append order of duplicate
+    rows for the same site in ssu_scores.parquet.
+    """
+    bed = pd.read_csv(test_bed, sep="\t", header=None, names=["chrom", "start", "end"])
+    starts = bed["start"].to_numpy()
+    ends = bed["end"].to_numpy()
+    window_start = np.empty(len(bed), dtype=np.int64)
+    window_end = np.empty(len(bed), dtype=np.int64)
+    for i in range(len(bed)):
+        window_start[i], window_end[i] = pad_interval(int(starts[i]), int(ends[i]), sequence_length)
+    bed["window_start"] = window_start
+    bed["window_end"] = window_end
+    bed["iv_idx"] = np.arange(len(bed))
+    return bed
+
+
+def select_max_context_junction_rows(df: pd.DataFrame, windows: pd.DataFrame) -> pd.DataFrame:
+    """Per (junction, sample), keep only the row whose window best centers both breakpoints.
+
+    junction_scores.parquet already carries `interval_idx`, so this is a
+    straightforward vectorized merge + groupby-idxmax (no reconstruction needed).
+    """
+    win = windows[["iv_idx", "window_start", "window_end"]].rename(columns={"iv_idx": "interval_idx"})
+    merged = df.merge(win, on="interval_idx", how="left")
+
+    donor = merged["donor_pos_1based"].to_numpy() - 1
+    acceptor = merged["acceptor_pos_1based"].to_numpy() - 1
+    ws = merged["window_start"].to_numpy()
+    we = merged["window_end"].to_numpy()
+    clearance = np.minimum.reduce([donor - ws, we - donor, acceptor - ws, we - acceptor])
+    merged["_clearance"] = clearance
+
+    key = JUNC_KEY + ["sample_id"]
+    best_idx = merged.groupby(key)["_clearance"].idxmax()
+    best = merged.loc[best_idx].drop(columns=["window_start", "window_end", "interval_idx", "_clearance"])
+    return best.reset_index(drop=True)
+
+
+def _containing_windows_long(chroms_pos: pd.DataFrame, windows: pd.DataFrame) -> pd.DataFrame:
+    """For each unique (chrom, exon_pos) in `chroms_pos`, the ascending-iv_idx-sorted
+    list of windows containing it, exploded into a long (chrom, exon_pos, rank, iv_idx)
+    table -- `rank` is the 0-based position in that ascending-iv_idx ordering.
+
+    Vectorized per chromosome (broadcast window bounds against unique positions);
+    only loops over unique positions (tens of thousands), never over raw rows
+    (millions), to build the ragged per-position candidate lists.
+    """
+    out_chrom, out_pos, out_rank, out_iv = [], [], [], []
+    for chrom, wchrom in windows.groupby("chrom", sort=False):
+        positions = chroms_pos.loc[chroms_pos["chrom"] == chrom, "exon_pos"].unique()
+        if len(positions) == 0:
+            continue
+        order = np.argsort(wchrom["iv_idx"].to_numpy())
+        ws = wchrom["window_start"].to_numpy()[order]
+        we = wchrom["window_end"].to_numpy()[order]
+        iv_idx = wchrom["iv_idx"].to_numpy()[order]
+
+        contains = (ws[:, None] < positions[None, :]) & (positions[None, :] <= we[:, None])
+        for j, pos in enumerate(positions):
+            hits = iv_idx[contains[:, j]]  # already ascending (iv_idx pre-sorted above)
+            out_chrom.extend([chrom] * len(hits))
+            out_pos.extend([pos] * len(hits))
+            out_rank.extend(range(len(hits)))
+            out_iv.extend(hits.tolist())
+
+    return pd.DataFrame({"chrom": out_chrom, "exon_pos": out_pos, "rank": out_rank, "iv_idx": out_iv})
+
+
+def select_max_context_ssu_rows(df: pd.DataFrame, windows: pd.DataFrame) -> pd.DataFrame:
+    """Per (site, sample), keep only the row from the window that best centers the site.
+
+    ssu_scores.parquet has no interval_idx, so it's reconstructed: rows for a
+    given (chrom, exon_pos, strand, sample_id) are appended in strictly
+    ascending iv_idx order by collect_predictions.py's single serial loop, so
+    the k-th row in file order is the k-th smallest-iv_idx window containing
+    that position. `rank` (groupby-cumcount, vectorized) recovers k; a single
+    merge against the precomputed long candidate table recovers iv_idx.
+    """
+    df = df.reset_index(drop=True)
+    key = ["chrom", "exon_pos", "strand", "sample_id"]
+    df["rank"] = df.groupby(key).cumcount()
+
+    long = _containing_windows_long(df[["chrom", "exon_pos"]], windows)
+    merged = df.merge(long, on=["chrom", "exon_pos", "rank"], how="left")
+    n_unmatched = merged["iv_idx"].isna().sum()
+    if n_unmatched:
+        print("  WARNING: {} of {} ssu rows could not be matched to a window "
+              "(rank exceeded reconstructed candidate count); these keep their "
+              "own value but are never preferred as the max-context pick.".format(
+                  n_unmatched, len(merged)))
+
+    merged = merged.merge(windows[["iv_idx", "window_start", "window_end"]], on="iv_idx", how="left")
+    pos0 = merged["exon_pos"].to_numpy() - 1
+    ws = merged["window_start"].to_numpy(dtype="float64")
+    we = merged["window_end"].to_numpy(dtype="float64")
+    clearance = np.minimum(pos0 - ws, we - pos0)
+    clearance = np.where(np.isnan(clearance), -np.inf, clearance)
+    merged["_clearance"] = clearance
+
+    best_idx = merged.groupby(key)["_clearance"].idxmax()
+    best = merged.loc[best_idx].drop(columns=["rank", "iv_idx", "window_start", "window_end", "_clearance"])
+    return best.reset_index(drop=True)
 
 
 # ---------------------------------------------------------------------------
@@ -264,16 +410,6 @@ def load_ssu_scores(eval_dir: str, run_name: str, epoch: int, subset: str, renam
     return df
 
 
-def dedup_ssu_mean(df: pd.DataFrame) -> pd.DataFrame:
-    """Collapse duplicate (site, sample) rows created by overlapping test-interval windows."""
-    key = ["chrom", "exon_pos", "strand", "sample_id"]
-    return df.groupby(key, as_index=False).agg(
-        pred_ssu=("pred_ssu", "mean"),
-        obs_ssu=("obs_ssu", "mean"),
-        alpha_juncs=("alpha_juncs", "max"),
-    )
-
-
 def common_sites(*dfs: pd.DataFrame) -> pd.DataFrame:
     """Intersection of (chrom, exon_pos, strand) splice sites present in every df."""
     sites = None
@@ -298,13 +434,21 @@ def ssu_pearson_rows(df: pd.DataFrame, model_name: str) -> list[dict]:
     return rows
 
 
-def site_specificity(df: pd.DataFrame, key_cols: list[str], value_col: str) -> tuple[set, set]:
-    """Sites/junctions where observed usage/count is > 0 in one sample and 0 in the other."""
+def site_specificity(df: pd.DataFrame, key_cols: list[str], value_col: str) -> tuple[set, set, set]:
+    """Partition sites/junctions by whether observed usage/count is nonzero in WT, K700E, or both.
+
+    Returns (wt_specific, k7_specific, shared): wt_specific/k7_specific are nonzero in only
+    one sample; shared is the true intersection between conditions (nonzero in both) --
+    distinct from `general`, which is simply the raw set common across all models'
+    predictions, regardless of per-condition usage.
+    """
     wt_id, k7_id = SAMPLE_ID_OF["WT"], SAMPLE_ID_OF["K700E"]
     pivot = df.pivot_table(index=key_cols, columns="sample_id", values=value_col, aggfunc="mean")
-    wt_specific = set(map(tuple, pivot[(pivot[wt_id] > 0) & (pivot[k7_id].fillna(0) == 0)].index))
-    k7_specific = set(map(tuple, pivot[(pivot[k7_id] > 0) & (pivot[wt_id].fillna(0) == 0)].index))
-    return wt_specific, k7_specific
+    wt_vals, k7_vals = pivot[wt_id].fillna(0), pivot[k7_id].fillna(0)
+    wt_specific = set(map(tuple, pivot[(wt_vals > 0) & (k7_vals == 0)].index))
+    k7_specific = set(map(tuple, pivot[(k7_vals > 0) & (wt_vals == 0)].index))
+    shared = set(map(tuple, pivot[(wt_vals > 0) & (k7_vals > 0)].index))
+    return wt_specific, k7_specific, shared
 
 
 def filter_by_key(df: pd.DataFrame, key_cols: list[str], key_set: set | None) -> pd.DataFrame:
@@ -318,9 +462,12 @@ def prepare_ssu(args) -> pd.DataFrame:
     key = ["chrom", "exon_pos", "strand"]
     labels = {
         "general":        "General",
+        "shared":         "Shared splice sites",
         "wt_specific":    "WT-specific sites",
         "k700e_specific": "K700E-specific sites",
     }
+
+    windows = load_test_windows(args.test_bed, args.sequence_length)
 
     ag_dfs = {
         label: load_ssu_scores(eval_dir, run_name, args.epoch, args.subset, rename_pos="exon_pos_1based")
@@ -331,8 +478,8 @@ def prepare_ssu(args) -> pd.DataFrame:
         for label, run_name in _pangolin_runs(args).items()
     }
 
-    ag_dedups = {label: dedup_ssu_mean(df) for label, df in ag_dfs.items()}
-    pg_dedups = {label: dedup_ssu_mean(df) for label, df in pg_dfs.items()}
+    ag_dedups = {label: select_max_context_ssu_rows(df, windows) for label, df in ag_dfs.items()}
+    pg_dedups = {label: select_max_context_ssu_rows(df, windows) for label, df in pg_dfs.items()}
 
     sites = common_sites(*ag_dedups.values(), *pg_dedups.values())
     commons = {
@@ -340,12 +487,13 @@ def prepare_ssu(args) -> pd.DataFrame:
         for label, df in {**ag_dedups, **pg_dedups}.items()
     }
 
-    wt_specific, k700e_specific = site_specificity(next(iter(commons.values())), key, "obs_ssu")
+    wt_specific, k700e_specific, shared = site_specificity(next(iter(commons.values())), key, "obs_ssu")
 
     records = []
     for model_label, df in commons.items():
         for setting, key_set in [
             ("general", None),
+            ("shared", shared),
             ("wt_specific", wt_specific),
             ("k700e_specific", k700e_specific),
         ]:
@@ -363,15 +511,6 @@ def prepare_ssu(args) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 JUNC_KEY = ["chrom", "donor_pos_1based", "acceptor_pos_1based", "strand"]
-
-
-def dedup_junction_mean(df: pd.DataFrame) -> pd.DataFrame:
-    """Collapse duplicate (junction, sample) rows created by overlapping test-interval windows."""
-    key = JUNC_KEY + ["sample_id"]
-    return df.groupby(key, as_index=False).agg(
-        pred_count=("pred_count", "mean"),
-        obs_count=("obs_count", "mean"),
-    )
 
 
 def junction_pearson_rows(df: pd.DataFrame, model_name: str) -> list[dict]:
@@ -392,22 +531,26 @@ def junction_pearson_rows(df: pd.DataFrame, model_name: str) -> list[dict]:
 def prepare_junctions(args) -> pd.DataFrame:
     labels = {
         "general":        "General",
+        "shared":         "Shared junctions",
         "wt_specific":    "WT-specific junctions",
         "k700e_specific": "K700E-specific junctions",
     }
+
+    windows = load_test_windows(args.test_bed, args.sequence_length)
 
     dedups = {}
     for model_label, (eval_dir, run_name) in _ag_runs(args).items():
         pred_dir = os.path.join(eval_dir, run_name, "epoch{}".format(args.epoch), args.subset, "predictions")
         junc_df = pd.read_parquet(os.path.join(pred_dir, "junction_scores.parquet"))
-        dedups[model_label] = dedup_junction_mean(junc_df)
+        dedups[model_label] = select_max_context_junction_rows(junc_df, windows)
 
-    wt_specific, k700e_specific = site_specificity(next(iter(dedups.values())), JUNC_KEY, "obs_count")
+    wt_specific, k700e_specific, shared = site_specificity(next(iter(dedups.values())), JUNC_KEY, "obs_count")
 
     records = []
     for model_label, df in dedups.items():
         for setting, key_set in [
             ("general", None),
+            ("shared", shared),
             ("wt_specific", wt_specific),
             ("k700e_specific", k700e_specific),
         ]:
