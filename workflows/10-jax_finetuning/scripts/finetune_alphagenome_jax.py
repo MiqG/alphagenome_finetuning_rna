@@ -195,6 +195,17 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--organism", default="HOMO_SAPIENS")
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--run-name", required=True)
+    parser.add_argument("--resume", choices=["auto", "none"], default="auto",
+                         help="'auto' (default): if <output-dir>/<run-name>/last "
+                              "already has a train_state.json (from a previous, "
+                              "possibly-preempted invocation with the same "
+                              "--output-dir/--run-name), resume model weights "
+                              "from it via alphagenome_ft.load_checkpoint and "
+                              "continue epoch/global_step bookkeeping from "
+                              "there instead of --rope-init reinit + fresh "
+                              "pretrained weights. 'none' always starts fresh. "
+                              "Mirrors alphagenome-pytorch's --resume auto. "
+                              "Optimizer state (Adam moments) is never resumed.")
     return parser.parse_args()
 
 
@@ -202,7 +213,7 @@ def main() -> None:
     args = _parse_args()
 
     # Imports deferred past argparse so --help works without a full JAX install.
-    from alphagenome_ft import create_model_with_heads
+    from alphagenome_ft import create_model_with_heads, load_checkpoint
     from alphagenome_ft.finetune import config as ft_config
     from alphagenome_ft.finetune.splice_data import SpliceDataModule
     from alphagenome_ft.finetune.train import register_predefined_heads, train as run_train
@@ -241,21 +252,35 @@ def main() -> None:
     ft_config.validate_head_specs(specs)
     register_predefined_heads(specs)
 
-    print("Loading pretrained AlphaGenome JAX model from local checkpoint "
-          f"cache: {args.checkpoint_path}")
-    model = create_model_with_heads(
-        heads=[spec.head_id for spec in specs],
-        checkpoint_path=args.checkpoint_path,
-        init_seq_len=args.sequence_length,
-    )
+    checkpoint_dir = args.output_dir / args.run_name
+    resume_dir = checkpoint_dir / "last"
+    do_resume = args.resume == "auto" and (resume_dir / "train_state.json").exists()
 
-    if args.rope_init == "truncated_normal":
-        print(f"Re-initializing junction head RoPE embeddings "
-              f"(std={args.rope_init_std}) to avoid the zero-init dead-gradient "
-              f"bug — see module docstring.")
-        _reinit_junction_rope_embeddings(
-            model, head_ids["splice_sites_junction"], std=args.rope_init_std, seed=args.seed,
+    if do_resume:
+        print(f"Found existing checkpoint at {resume_dir} — resuming from it "
+              f"(skipping fresh pretrained-weight load and --rope-init reinit, "
+              f"both of which would clobber already-trained head weights).")
+        model = load_checkpoint(
+            resume_dir,
+            base_checkpoint_path=args.checkpoint_path,
+            init_seq_len=args.sequence_length,
         )
+    else:
+        print("Loading pretrained AlphaGenome JAX model from local checkpoint "
+              f"cache: {args.checkpoint_path}")
+        model = create_model_with_heads(
+            heads=[spec.head_id for spec in specs],
+            checkpoint_path=args.checkpoint_path,
+            init_seq_len=args.sequence_length,
+        )
+
+        if args.rope_init == "truncated_normal":
+            print(f"Re-initializing junction head RoPE embeddings "
+                  f"(std={args.rope_init_std}) to avoid the zero-init dead-gradient "
+                  f"bug — see module docstring.")
+            _reinit_junction_rope_embeddings(
+                model, head_ids["splice_sites_junction"], std=args.rope_init_std, seed=args.seed,
+            )
 
     intervals = {
         "train": _load_interval_list(args.train_bed, window_size=args.sequence_length),
@@ -289,7 +314,6 @@ def main() -> None:
         filter_to_junctions=args.filter_to_junctions,
     )
 
-    checkpoint_dir = args.output_dir / args.run_name
     run_train(
         model,
         data_module,
@@ -304,6 +328,7 @@ def main() -> None:
         organism=args.organism,
         num_devices=args.num_devices,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
+        resume_from=resume_dir if do_resume else None,
         verbose=True,
     )
 

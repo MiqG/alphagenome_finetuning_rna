@@ -112,6 +112,13 @@ rule jax_full_finetune:
     resources:
         runtime   = int(7 * 24 * 60),  # hours in minutes
         memory    = 128,
+        # gpu_diasfrazer's single non-MIG H100 has no partition time limit and
+        # is preferred whenever free. genoa64-09a's gpu:7g.80gb MIG slice (gpu
+        # partition, full-size 7/7-compute-instance, full-80GB profile) is a
+        # memory-/compute-equivalent fallback when the H100 is occupied by
+        # another user's job, but is subject to that partition's QOS time
+        # limit — --resume auto (see finetune_alphagenome_jax.py) makes
+        # switching between the two safe.
         gres      = "gpu:h100:{}".format(SF3B1_FT_CFG["num_devices"]),
         partition = "gpu_diasfrazer",
     conda:
