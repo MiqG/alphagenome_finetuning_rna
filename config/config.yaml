@@ -86,6 +86,33 @@ finetuning:
       gradient_accumulation_steps: 16
       track_means_samples: 1000  # deterministic every-Nth subset; sufficient for mean estimation
       save_every_steps: 250
+  alphagenome_ft:
+    # JAX (alphagenome_ft/alphagenome_research) probing reproduction of the
+    # PyTorch "randinit__newloss__annotated__frozen__multigpu_ddp" paper run.
+    # Splice heads only (splice_site, splice_usage, splice_junctions) —
+    # alphagenome_ft's SpliceDataModule does not (yet) also feed rna_seq
+    # bigwig targets in the same batch as the PyTorch run's joint 4-modality
+    # training; see plans/10-jax-alphagenome_ft-reproduction.md.
+    # FOLD_1, matching alphagenome_pytorch's model_fold_1.safetensors: the
+    # checkpoint pretrained holding out FOLD_1 regions, so it doesn't leak
+    # our FOLD_1 test intervals the way the "all_folds" checkpoint would.
+    kaggle_model_version: "fold_1"
+    checkpoint_cache_dir: "data/raw/articles/Avsec2026/alphagenome_ft/kaggle_fold_1"
+    sf3b1mut:
+      output_dir: "results/finetuning/alphagenome_ft/full"
+      sequence_length: 1048576
+      junction_position_source: "annotated"
+      max_splice_sites: 256
+      lr: 1e-4
+      weight_decay: 0.0
+      epochs: 10
+      # batch_size 1 x num_devices 1 x gradient_accumulation_steps 64 = effective
+      # batch 64, matching the PyTorch probing run's 1 x 4 GPUs x grad_accum 16
+      # (this cluster only has one non-MIG H100 total, see
+      # plans/10-jax-alphagenome_ft-reproduction.md).
+      batch_size: 1
+      gradient_accumulation_steps: 64
+      num_devices: 1
 
 preprocessing:
   overfitting:

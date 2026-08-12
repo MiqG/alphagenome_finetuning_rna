@@ -1,0 +1,153 @@
+"""
+JAX finetuning workflow (alphagenome_ft): probing reproduction of the
+PyTorch paper run "randinit__newloss__annotated__frozen__multigpu_ddp".
+
+Cross-checks the alphagenome-pytorch splicing fine-tuning results against a
+JAX/alphagenome_research-based finetuning path, using the sibling
+alphagenome_ft package (splice-finetuning branch,
+/users/diasfrazer/manglada/repositories/alphagenome_ft).
+
+Scope: splice heads only (splice_site, splice_usage, splice_junctions) — see
+plans/10-jax-alphagenome_ft-reproduction.md for why rna_seq is not trained
+jointly here, and for the other framework differences (Kaggle-hosted
+weights instead of HuggingFace, no LoRA-parity, no gradient accumulation)
+that a straight comparison against the PyTorch runs needs to account for.
+
+Run with:
+    snakemake -s workflows/10-jax_finetuning/Snakefile --use-conda [-n]
+
+As with other GPU workflows in this repo, submit the actual (non-dry-run)
+run via SLURM rather than on the login node:
+    ./src/scripts/submit_snakemake_slurm.sh \
+        "snakemake -s workflows/10-jax_finetuning/Snakefile --use-conda -j 4"
+"""
+
+import os
+
+configfile: "config/config.yaml"
+
+DATA_DIR   = config["rnaseq"]["sf3b1mut"]["path"]
+FOLDS_DIR  = config["finetuning"]["alphagenome"]["folds_dir"]
+FOLD       = config["preprocessing"]["overfitting"]["fold"]
+SAMPLES    = config["preprocessing"]["overfitting"]["samples"]
+
+FT_CFG          = config["finetuning"]["alphagenome_ft"]
+SF3B1_FT_CFG    = FT_CFG["sf3b1mut"]
+OUTPUT_DIR      = SF3B1_FT_CFG["output_dir"]
+CHECKPOINT_CACHE_DIR = FT_CFG["checkpoint_cache_dir"]
+
+SCRIPTS_DIR = os.path.join(os.path.dirname(workflow.snakefile), "scripts")
+
+RUN_NAME = "randinit__annotated__frozen__probing_jax"
+
+
+rule all:
+    input:
+        os.path.join(OUTPUT_DIR, RUN_NAME, "last"),
+
+
+rule download_alphagenome_jax_weights:
+    """One-time Kaggle checkpoint cache — run on the login node (needs Kaggle
+    credentials + internet), not inside the SLURM GPU job. See the script
+    docstring for why."""
+    output:
+        checkpoint_path_file = os.path.join(CHECKPOINT_CACHE_DIR, "checkpoint_path.txt"),
+    params:
+        model_version = FT_CFG["kaggle_model_version"],
+        script        = os.path.join(SCRIPTS_DIR, "download_alphagenome_jax_weights.py"),
+    threads: 1
+    resources:
+        gres      = "none",
+        partition = "genoa64",
+        runtime   = 60,
+        memory    = 4,
+    conda:
+        "alphagenome"
+    shell:
+        """
+        # This login node has no /etc/ssl/certs/ca-certificates.crt, which
+        # TensorFlow's GCS client (used by kagglehub's dependencies) hardcodes
+        # by default — point it at the conda env's own cert bundle instead.
+        export CURL_CA_BUNDLE="${{CONDA_PREFIX}}/ssl/cacert.pem"
+        export SSL_CERT_FILE="${{CONDA_PREFIX}}/ssl/cacert.pem"
+
+        python {params.script} \
+            --model-version {params.model_version} \
+            --output-path-file {output.checkpoint_path_file}
+        """
+
+
+rule jax_full_finetune:
+    """Splice-only probing finetune on the full FOLD_1 train/val split."""
+    input:
+        checkpoint_path_file = os.path.join(CHECKPOINT_CACHE_DIR, "checkpoint_path.txt"),
+        genome         = config["gencode"]["paths"]["fasta"],
+        train_bed      = os.path.join(FOLDS_DIR, FOLD, "train.bed"),
+        val_bed        = os.path.join(FOLDS_DIR, FOLD, "valid.bed"),
+        star_junctions = [
+            os.path.join(DATA_DIR, "STAR", sample, "paper_pass.SJ.out.tab")
+            for sample in SAMPLES
+        ],
+        ssu_parquets = [
+            os.path.join(DATA_DIR, "STAR", sample, "paper_pass.ssu.parquet")
+            for sample in SAMPLES
+        ],
+    output:
+        checkpoint_dir = directory(os.path.join(OUTPUT_DIR, RUN_NAME, "last")),
+    benchmark:
+        os.path.join(OUTPUT_DIR, "benchmarks", RUN_NAME, "jax_full_finetune.tsv")
+    params:
+        script          = os.path.join(SCRIPTS_DIR, "finetune_alphagenome_jax.py"),
+        sequence_length = SF3B1_FT_CFG["sequence_length"],
+        junction_position_source = SF3B1_FT_CFG["junction_position_source"],
+        max_splice_sites = SF3B1_FT_CFG["max_splice_sites"],
+        lr              = SF3B1_FT_CFG["lr"],
+        weight_decay    = SF3B1_FT_CFG["weight_decay"],
+        epochs          = SF3B1_FT_CFG["epochs"],
+        batch_size      = SF3B1_FT_CFG["batch_size"],
+        gradient_accumulation_steps = SF3B1_FT_CFG["gradient_accumulation_steps"],
+        num_devices     = SF3B1_FT_CFG["num_devices"],
+        output_dir      = OUTPUT_DIR,
+    threads: SF3B1_FT_CFG["num_devices"] * 8
+    resources:
+        runtime   = int(7 * 24 * 60),  # hours in minutes
+        memory    = 128,
+        gres      = "gpu:h100:{}".format(SF3B1_FT_CFG["num_devices"]),
+        partition = "gpu_diasfrazer",
+    conda:
+        "alphagenome"
+    retries: 1
+    shell:
+        """
+        set -eo pipefail
+
+        # See download_alphagenome_jax_weights rule above for why this is needed
+        # (real AlphaGenomeModel construction also fetches calibration scores
+        # from GCS, hitting the same missing-system-CA-bundle issue).
+        export CURL_CA_BUNDLE="${{CONDA_PREFIX}}/ssl/cacert.pem"
+        export SSL_CERT_FILE="${{CONDA_PREFIX}}/ssl/cacert.pem"
+
+        CHECKPOINT_PATH=$(cat {input.checkpoint_path_file})
+
+        python {params.script} \
+            --checkpoint-path "$CHECKPOINT_PATH" \
+            --genome {input.genome} \
+            --train-bed {input.train_bed} \
+            --val-bed {input.val_bed} \
+            --star-junctions {input.star_junctions} \
+            --ssu {input.ssu_parquets} \
+            --junction-position-source {params.junction_position_source} \
+            --sequence-length {params.sequence_length} \
+            --max-splice-sites {params.max_splice_sites} \
+            --lr {params.lr} \
+            --weight-decay {params.weight_decay} \
+            --epochs {params.epochs} \
+            --batch-size {params.batch_size} \
+            --gradient-accumulation-steps {params.gradient_accumulation_steps} \
+            --num-devices {params.num_devices} \
+            --seed 1234 \
+            --output-dir {params.output_dir} \
+            --run-name {RUN_NAME}
+
+        echo "Done!"
+        """
