@@ -134,6 +134,15 @@ rule jax_full_finetune:
         export CURL_CA_BUNDLE="${{CONDA_PREFIX}}/ssl/cacert.pem"
         export SSL_CERT_FILE="${{CONDA_PREFIX}}/ssl/cacert.pem"
 
+        # A single 1,048,576bp example's forward+backward pass needs ~64-98GiB
+        # (per XLA's own rematerialization report), close enough to this
+        # GPU's 80GB that the default BFC allocator's find-a-contiguous-block
+        # strategy can fail on fragmentation alone even with enough total free
+        # memory (RESOURCE_EXHAUSTED at first training step). cuda_malloc_async
+        # uses CUDA's own pooled allocator instead, which doesn't have that
+        # failure mode.
+        export TF_GPU_ALLOCATOR=cuda_malloc_async
+
         CHECKPOINT_PATH=$(cat {input.checkpoint_path_file})
 
         python {params.script} \
