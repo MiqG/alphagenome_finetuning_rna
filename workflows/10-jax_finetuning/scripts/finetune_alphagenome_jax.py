@@ -182,6 +182,19 @@ def _parse_args() -> argparse.Namespace:
                               "the PyTorch probing run's batch=1 x 4 GPUs x "
                               "grad_accum=16.")
     parser.add_argument("--num-devices", type=int, default=4)
+    parser.add_argument("--gradient-checkpointing", action="store_true",
+                         help="Mirrors alphagenome-pytorch's --gradient-checkpointing: "
+                              "wrap the backbone forward pass in jax.checkpoint so its "
+                              "activations are recomputed on the backward pass instead "
+                              "of retained, trading compute for memory. Currently a "
+                              "no-op for this probing run: --rope-init/--resume both "
+                              "already imply detach_backbone=True (heads-only, frozen "
+                              "trunk), and no backward pass ever reaches the backbone "
+                              "in that case -- same reason alphagenome-pytorch's own "
+                              "--gradient-checkpointing is inert for its frozen-backbone "
+                              "path (torch.no_grad() there means torch.utils.checkpoint "
+                              "has nothing to recompute either). Wired here for parity "
+                              "and for future non-frozen modes (e.g. real backbone LoRA).")
     parser.add_argument("--max-train-steps", type=int, default=None,
                          help="Optional global cap on optimizer updates, for "
                               "quick smoke-test runs before a full finetune.")
@@ -265,6 +278,7 @@ def main() -> None:
             base_checkpoint_path=args.checkpoint_path,
             init_seq_len=args.sequence_length,
             detach_backbone=True,
+            gradient_checkpointing=args.gradient_checkpointing,
         )
     else:
         print("Loading pretrained AlphaGenome JAX model from local checkpoint "
@@ -280,6 +294,7 @@ def main() -> None:
             # GPU at batch_size=1: peak memory was consistent with training
             # the whole model, not just the small splice heads.
             detach_backbone=True,
+            gradient_checkpointing=args.gradient_checkpointing,
         )
 
         if args.rope_init == "truncated_normal":
