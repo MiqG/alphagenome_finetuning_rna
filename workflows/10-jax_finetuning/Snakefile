@@ -121,6 +121,13 @@ rule jax_full_finetune:
         # switching between the two safe.
         gres      = "gpu:7g.80gb:{}".format(SF3B1_FT_CFG["num_devices"]),
         partition = "gpu",
+        # gpu_diasfrazer auto-upgrades QOS based on --time; the shared "gpu"
+        # partition doesn't and instead rejects the sbatch outright
+        # ("Requested time limit is invalid") unless a QOS long enough is
+        # given explicitly. marathon (7 days) is available to our account on
+        # both partitions (sacctmgr show assoc), so request it explicitly on
+        # both for consistent behavior.
+        qos       = "marathon",
     conda:
         "alphagenome"
     retries: 1
