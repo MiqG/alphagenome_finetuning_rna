@@ -40,6 +40,24 @@ SCRIPTS_DIR = os.path.join(os.path.dirname(workflow.snakefile), "scripts")
 
 RUN_NAME = "randinit__annotated__frozen__probing_jax"
 
+# GPU target for jax_full_finetune, overridable via --config gpu_target=mig.
+# "h100" (default): gpu_diasfrazer's single non-MIG H100 — no partition time
+#   limit, preferred whenever free.
+# "mig": genoa64-09a's gpu:7g.80gb MIG slice on the shared "gpu" partition —
+#   memory-/compute-equivalent fallback when the H100 is occupied by another
+#   user's job, but that partition rejects --time beyond 12h outright
+#   (confirmed empirically: --qos=marathon still gets "Requested time limit
+#   is invalid" above 12h, despite marathon being nominally available to our
+#   account there per sacctmgr — this looks like a separate, lower cap
+#   enforced specifically on this shared/billed partition). --resume auto
+#   (see finetune_alphagenome_jax.py) makes cycling through repeated 12h
+#   allocations, or bouncing between this and "h100", safe.
+GPU_PRESETS = {
+    "h100": {"partition": "gpu_diasfrazer", "gres_type": "h100", "runtime": 7 * 24 * 60, "qos": "marathon"},
+    "mig":  {"partition": "gpu", "gres_type": "7g.80gb", "runtime": 12 * 60, "qos": "normal"},
+}
+GPU_CFG = GPU_PRESETS[config.get("gpu_target", "h100")]
+
 
 rule all:
     input:
@@ -110,24 +128,11 @@ rule jax_full_finetune:
         output_dir      = OUTPUT_DIR,
     threads: SF3B1_FT_CFG["num_devices"] * 8
     resources:
-        runtime   = int(7 * 24 * 60),  # hours in minutes
+        runtime   = GPU_CFG["runtime"],
         memory    = 128,
-        # gpu_diasfrazer's single non-MIG H100 has no partition time limit and
-        # is preferred whenever free. genoa64-09a's gpu:7g.80gb MIG slice (gpu
-        # partition, full-size 7/7-compute-instance, full-80GB profile) is a
-        # memory-/compute-equivalent fallback when the H100 is occupied by
-        # another user's job, but is subject to that partition's QOS time
-        # limit — --resume auto (see finetune_alphagenome_jax.py) makes
-        # switching between the two safe.
-        gres      = "gpu:7g.80gb:{}".format(SF3B1_FT_CFG["num_devices"]),
-        partition = "gpu",
-        # gpu_diasfrazer auto-upgrades QOS based on --time; the shared "gpu"
-        # partition doesn't and instead rejects the sbatch outright
-        # ("Requested time limit is invalid") unless a QOS long enough is
-        # given explicitly. marathon (7 days) is available to our account on
-        # both partitions (sacctmgr show assoc), so request it explicitly on
-        # both for consistent behavior.
-        qos       = "marathon",
+        gres      = "gpu:{}:{}".format(GPU_CFG["gres_type"], SF3B1_FT_CFG["num_devices"]),
+        partition = GPU_CFG["partition"],
+        qos       = GPU_CFG["qos"],
     conda:
         "alphagenome"
     retries: 1
