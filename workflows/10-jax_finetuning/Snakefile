@@ -146,17 +146,6 @@ rule jax_full_finetune:
         export CURL_CA_BUNDLE="${{CONDA_PREFIX}}/ssl/cacert.pem"
         export SSL_CERT_FILE="${{CONDA_PREFIX}}/ssl/cacert.pem"
 
-        # A single 1,048,576bp example's forward+backward pass needs
-        # ~63-65GiB after XLA's own rematerialization pass (down from ~98GiB
-        # unrematerialized). JAX's default XLA_PYTHON_CLIENT_MEM_FRACTION
-        # preallocates well under this GPU's full 80GB, so the run OOMs even
-        # though the hardware itself has enough memory. (TF_GPU_ALLOCATOR is
-        # a TensorFlow-only knob and has no effect on JAX's own PJRT/XLA GPU
-        # client -- confirmed the allocator was still GPU_0_bfc with it set.)
-        # This job gets the whole GPU to itself, so it's safe to claim nearly
-        # all of it.
-        export XLA_PYTHON_CLIENT_MEM_FRACTION=0.95
-
         CHECKPOINT_PATH=$(cat {input.checkpoint_path_file})
 
         python {params.script} \

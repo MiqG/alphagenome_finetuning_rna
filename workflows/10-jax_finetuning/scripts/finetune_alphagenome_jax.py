@@ -264,6 +264,7 @@ def main() -> None:
             resume_dir,
             base_checkpoint_path=args.checkpoint_path,
             init_seq_len=args.sequence_length,
+            detach_backbone=True,
         )
     else:
         print("Loading pretrained AlphaGenome JAX model from local checkpoint "
@@ -272,6 +273,13 @@ def main() -> None:
             heads=[spec.head_id for spec in specs],
             checkpoint_path=args.checkpoint_path,
             init_seq_len=args.sequence_length,
+            # heads_only=True in run_train() below only zeroes the backbone's
+            # optimizer updates -- without this, jax.grad still backprops
+            # through the full ~450M-param frozen trunk every step, which is
+            # almost certainly why the first real run OOM'd on a single 80GB
+            # GPU at batch_size=1: peak memory was consistent with training
+            # the whole model, not just the small splice heads.
+            detach_backbone=True,
         )
 
         if args.rope_init == "truncated_normal":
