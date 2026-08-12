@@ -119,8 +119,8 @@ rule jax_full_finetune:
         # another user's job, but is subject to that partition's QOS time
         # limit — --resume auto (see finetune_alphagenome_jax.py) makes
         # switching between the two safe.
-        gres      = "gpu:h100:{}".format(SF3B1_FT_CFG["num_devices"]),
-        partition = "gpu_diasfrazer",
+        gres      = "gpu:7g.80gb:{}".format(SF3B1_FT_CFG["num_devices"]),
+        partition = "gpu",
     conda:
         "alphagenome"
     retries: 1
