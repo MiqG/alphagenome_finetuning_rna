@@ -61,35 +61,40 @@ mechanism on both sides rather than assuming):
   (different data-loading architecture; doesn't affect training outputs,
   only throughput).
 
-**Known gap, NOT fixed — real, and feasibility is unclear:**
+**`--track-means-samples 1000` — investigated further (2026-08-13), now fixed:**
 
-- **`--track-means-samples 1000`**: PyTorch computes real per-track nonzero
-  means from 1000 sampled windows (`compute_track_means`) and the rna_seq
-  head *divides its output by `track_means * resolution` on every forward
-  pass* (`alphagenome_pytorch/heads.py` — `GenomeTracksHead`, confirmed by
-  reading the actual tensor op, not just the docstring) — a real, active
-  part of training dynamics for this run, not a no-op default (default
-  when omitted is `torch.ones(...)`, i.e. no scaling, but the probing run
-  does *not* omit it).
+Checked the *real* `alphagenome_research`/`alphagenome` source directly
+(`~/repositories/alphagenome_research`, `~/repositories/alphagenome` — not
+just the installed site-packages) rather than assuming the PyTorch-only
+reimplementation was the only place this could live. It turns out the real
+DeepMind head classes have this natively:
+`alphagenome_research/model/heads.py`'s `BaseResolutionHead.__init__`
+(`_get_track_means`) reads `metadata['nonzero_mean']` directly and uses it
+to rescale predictions/targets on every forward pass
+(`predictions_scaling`/`unscale`/`loss`) — falling back to all-ones (no
+scaling) only when that column is absent. This is a first-class feature of
+the real head, not something that would need monkey-patching.
 
-  `alphagenome_ft`'s config schema has a matching-looking `nonzero_mean`
-  field per track (`finetune/config.py`, with a docstring example showing
-  exactly this use case) — but grepped the entire `alphagenome_ft`
-  repository for `nonzero_mean`: it is parsed into `TrackInfo` and
-  **never read again anywhere**. It's a documented but unimplemented field,
-  not a working equivalent.
+The actual bug: `alphagenome_ft.finetune.config._build_track_metadata`
+already *parses* a track's `nonzero_mean` into `TrackInfo` (config schema
+even documents this exact use case), but then discards it —
+delegating to `_metadata_from_names`, which only ever builds a
+`name`/`strand` dataframe. So the field was accepted but silently had zero
+effect, for every predefined bigwig-backed head, not just rna_seq. Fixed by
+building the dataframe directly with a `nonzero_mean` column instead of
+discarding the values.
 
-  Not fixed this pass because the feasibility itself is unknown:
-  `alphagenome_ft` calls `alphagenome_research`'s real predefined rna_seq
-  head directly (no local reimplementation, consistent with every other
-  head in this codebase) — unlike PyTorch's own `GenomeTracksHead`
-  reimplementation, there may be no hook in the *real* DeepMind head class
-  to inject an equivalent per-track output scaling at all. Needs its own
-  investigation (does the real head accept anything like this natively?
-  if not, is monkey-patching/wrapping its forward pass even feasible,
-  the way `detach_backbone`/`gradient_checkpointing` wrap `forward_trunk`?)
-  before attempting an implementation — flagging explicitly rather than
-  either silently skipping it or guessing at a fix.
+On the workflow side: added `_compute_track_means` to the driver script,
+ported line-for-line from `alphagenome-pytorch`'s
+`datasets.py::compute_track_means` (same window centering/expansion, same
+deterministic every-Nth subsetting, same nonzero-mean formula) so values
+match what the PyTorch run would compute from the same `--train-bed`. No
+`strand_pair_groups` support needed — the probing run's workflow never sets
+strand pairs for rna_seq on the PyTorch side either.
+
+Verified via SLURM (not the login node): computed real, plausible nonzero
+means (~30–50) from the actual bigwig files, and confirmed they reach the
+real head's metadata `nonzero_mean` column exactly.
 
 ## Redo (2026-08-13): make the probing run genuinely equivalent to PyTorch's
 
