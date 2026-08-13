@@ -142,6 +142,7 @@ rule jax_full_finetune:
         batch_size      = SF3B1_FT_CFG["batch_size"],
         gradient_accumulation_steps = SF3B1_FT_CFG["gradient_accumulation_steps"],
         num_devices     = SF3B1_FT_CFG["num_devices"],
+        save_every_steps = SF3B1_FT_CFG["save_every_steps"],
         output_dir      = OUTPUT_DIR,
     threads: SF3B1_FT_CFG["num_devices"] * 8
     resources:
@@ -188,6 +189,7 @@ rule jax_full_finetune:
             --batch-size {params.batch_size} \
             --gradient-accumulation-steps {params.gradient_accumulation_steps} \
             --num-devices {params.num_devices} \
+            --save-every-steps {params.save_every_steps} \
             --gradient-checkpointing \
             --resume auto \
             --seed 1234 \

@@ -327,6 +327,15 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--max-train-steps", type=int, default=None,
                          help="Optional global cap on optimizer updates, for "
                               "quick smoke-test runs before a full finetune.")
+    parser.add_argument("--save-every-steps", type=int, default=None,
+                         help="Also save a 'last' checkpoint (+ opt_state, "
+                              "train_state.json) every this many optimizer "
+                              "steps, not just at epoch end. Mirrors "
+                              "alphagenome-pytorch's --save-every-steps — "
+                              "important here since epochs take ~10h and the "
+                              "gpu partition's MIG slice caps wall-time at "
+                              "12h, so epoch-end-only checkpointing risks "
+                              "losing a whole epoch's progress per kill.")
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--organism", default="HOMO_SAPIENS")
     parser.add_argument("--output-dir", required=True, type=Path)
@@ -515,6 +524,7 @@ def main() -> None:
         num_devices=args.num_devices,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         resume_from=resume_dir if do_resume else None,
+        save_every_steps=args.save_every_steps,
         verbose=True,
     )
 

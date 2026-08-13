@@ -89,10 +89,10 @@ finetuning:
   alphagenome_ft:
     # JAX (alphagenome_ft/alphagenome_research) probing reproduction of the
     # PyTorch "randinit__newloss__annotated__frozen__multigpu_ddp" paper run.
-    # Splice heads only (splice_site, splice_usage, splice_junctions) —
-    # alphagenome_ft's SpliceDataModule does not (yet) also feed rna_seq
-    # bigwig targets in the same batch as the PyTorch run's joint 4-modality
-    # training; see plans/10-jax-alphagenome_ft-reproduction.md.
+    # Trains all 4 modalities jointly (rna_seq + splice_site + splice_usage +
+    # splice_junctions), matching the PyTorch run; see
+    # plans/10-jax-alphagenome_ft-reproduction.md ("Redo" section) for the
+    # remaining known differences.
     # FOLD_1, matching alphagenome_pytorch's model_fold_1.safetensors: the
     # checkpoint pretrained holding out FOLD_1 regions, so it doesn't leak
     # our FOLD_1 test intervals the way the "all_folds" checkpoint would.
@@ -113,6 +113,10 @@ finetuning:
       batch_size: 1
       gradient_accumulation_steps: 64
       num_devices: 1
+      # Matches finetuning.alphagenome.sf3b1mut.save_every_steps (PyTorch) —
+      # mid-epoch checkpointing so a kill on a wall-time-limited partition
+      # loses at most this many optimizer steps, not the whole ~10h epoch.
+      save_every_steps: 250
 
 preprocessing:
   overfitting:
