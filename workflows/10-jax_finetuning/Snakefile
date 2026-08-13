@@ -7,11 +7,14 @@ JAX/alphagenome_research-based finetuning path, using the sibling
 alphagenome_ft package (splice-finetuning branch,
 /users/diasfrazer/manglada/repositories/alphagenome_ft).
 
-Scope: splice heads only (splice_site, splice_usage, splice_junctions) — see
-plans/10-jax-alphagenome_ft-reproduction.md for why rna_seq is not trained
-jointly here, and for the other framework differences (Kaggle-hosted
-weights instead of HuggingFace, no LoRA-parity, no gradient accumulation)
-that a straight comparison against the PyTorch runs needs to account for.
+Trains all 4 modalities jointly (rna_seq + splice_site + splice_usage +
+splice_junctions), matching workflows/05-full_finetuning/Snakefile's
+"randinit__newloss__annotated__frozen__multigpu_ddp" run as closely as the
+JAX/alphagenome_ft stack allows. See
+plans/10-jax-alphagenome_ft-reproduction.md ("Redo" section) for the
+remaining known differences (Kaggle-hosted weights instead of HuggingFace,
+no LoRA-parity, no pretrained-head-init for splice_site) that a straight
+comparison against the PyTorch run still needs to account for.
 
 Run with:
     snakemake -s workflows/10-jax_finetuning/Snakefile --use-conda [-n]
@@ -30,6 +33,7 @@ DATA_DIR   = config["rnaseq"]["sf3b1mut"]["path"]
 FOLDS_DIR  = config["finetuning"]["alphagenome"]["folds_dir"]
 FOLD       = config["preprocessing"]["overfitting"]["fold"]
 SAMPLES    = config["preprocessing"]["overfitting"]["samples"]
+BIGWIG_STRANDS = ["forward", "reverse"]  # matches workflows/05-full_finetuning/Snakefile
 
 FT_CFG          = config["finetuning"]["alphagenome_ft"]
 SF3B1_FT_CFG    = FT_CFG["sf3b1mut"]
@@ -61,7 +65,7 @@ GPU_CFG = GPU_PRESETS[config.get("gpu_target", "h100")]
 
 rule all:
     input:
-        os.path.join(OUTPUT_DIR, RUN_NAME, "last"),
+        os.path.join(OUTPUT_DIR, RUN_NAME, "training_complete.marker"),
 
 
 rule download_alphagenome_jax_weights:
@@ -96,12 +100,18 @@ rule download_alphagenome_jax_weights:
 
 
 rule jax_full_finetune:
-    """Splice-only probing finetune on the full FOLD_1 train/val split."""
+    """4-modality (rna_seq + 3 splice heads) probing finetune on the full FOLD_1 train/val split."""
     input:
         checkpoint_path_file = os.path.join(CHECKPOINT_CACHE_DIR, "checkpoint_path.txt"),
         genome         = config["gencode"]["paths"]["fasta"],
         train_bed      = os.path.join(FOLDS_DIR, FOLD, "train.bed"),
         val_bed        = os.path.join(FOLDS_DIR, FOLD, "valid.bed"),
+        bigwigs        = [
+            os.path.join(DATA_DIR, "STAR", sample,
+                         "paper_pass.Aligned.sortedByCoord.out.filtered." + strand + ".bw")
+            for sample in SAMPLES
+            for strand in BIGWIG_STRANDS
+        ],
         star_junctions = [
             os.path.join(DATA_DIR, "STAR", sample, "paper_pass.SJ.out.tab")
             for sample in SAMPLES
@@ -111,7 +121,14 @@ rule jax_full_finetune:
             for sample in SAMPLES
         ],
     output:
-        checkpoint_dir = directory(os.path.join(OUTPUT_DIR, RUN_NAME, "last")),
+        # Deliberately NOT checkpoint_dir/{last,best} (which --resume auto
+        # reads/writes across invocations) — a distinct marker, matching
+        # workflows/05-full_finetuning/Snakefile's pattern of declaring only
+        # the final-epoch artifact as output. See the plan doc's "Redo"
+        # section: declaring the resumable directory itself as the output
+        # is what let --rerun-incomplete silently wipe a real run's
+        # progress.
+        marker = os.path.join(OUTPUT_DIR, RUN_NAME, "training_complete.marker"),
     benchmark:
         os.path.join(OUTPUT_DIR, "benchmarks", RUN_NAME, "jax_full_finetune.tsv")
     params:
@@ -135,7 +152,13 @@ rule jax_full_finetune:
         qos       = GPU_CFG["qos"],
     conda:
         "alphagenome"
-    retries: 1
+    # Generous: on the "mig" GPU target (12h QOS cap), completing all
+    # SF3B1_FT_CFG["epochs"] epochs needs multiple SLURM allocations in a
+    # row, each resuming via --resume auto from the last one's checkpoint
+    # (safe now that the checkpoint dir is no longer the declared output —
+    # see above). Harmless on "h100" (no time limit): finishes in one
+    # attempt there, retries just go unused.
+    retries: 20
     shell:
         """
         set -eo pipefail
@@ -153,6 +176,7 @@ rule jax_full_finetune:
             --genome {input.genome} \
             --train-bed {input.train_bed} \
             --val-bed {input.val_bed} \
+            --bigwig {input.bigwigs} \
             --star-junctions {input.star_junctions} \
             --ssu {input.ssu_parquets} \
             --junction-position-source {params.junction_position_source} \
@@ -164,6 +188,8 @@ rule jax_full_finetune:
             --batch-size {params.batch_size} \
             --gradient-accumulation-steps {params.gradient_accumulation_steps} \
             --num-devices {params.num_devices} \
+            --gradient-checkpointing \
+            --resume auto \
             --seed 1234 \
             --output-dir {params.output_dir} \
             --run-name {RUN_NAME}

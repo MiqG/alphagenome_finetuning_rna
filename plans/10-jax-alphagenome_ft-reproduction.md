@@ -1,5 +1,158 @@
 # Plan: reproduce paper probing/LoRA runs with `alphagenome_ft` (JAX)
 
+## Redo (2026-08-13): make the probing run genuinely equivalent to PyTorch's
+
+The first real submission attempt surfaced two problems, both now understood
+and being fixed — this section documents the redo. Read bottom-to-top for
+history; this is the current state of intent.
+
+### Problem 1 (fixed): OOM was `detach_backbone` missing, not a hardware limit
+
+Already root-caused and fixed in a prior pass (see the "Fix real OOM cause"
+work further down / the corresponding commits in both repos):
+`create_model_with_heads`/`load_checkpoint` now take `detach_backbone` and
+`gradient_checkpointing`, matching what `alphagenome-pytorch`'s
+`training.py` already does for its frozen-backbone path
+(`torch.no_grad()` + `.detach()`). Confirmed working: a real submission
+trained cleanly (step-by-step loss decreasing, no OOM) before being stopped
+for the reasons below.
+
+### Problem 2 (being fixed now): the run wasn't actually equivalent to PyTorch, and the checkpoint/output design was wrong
+
+Two gaps identified when comparing directly against
+`workflows/05-full_finetuning/Snakefile` (the PyTorch run this is supposed to
+reproduce):
+
+1. **`rna_seq` was never trained jointly.** PyTorch's probing run
+   (`randinit__newloss__annotated__frozen__multigpu_ddp`) trains 4 modalities
+   per batch: `rna_seq` (bigwig-derived) + `splice_site`/`splice_usage`/
+   `splice_junctions` (STAR/SSU-derived) — see `--modality-weights
+   "rna_seq:1.0,splice_site:1.0,splice_usage:1.0,splice_junctions:1.0"` and
+   the two `--modality ... --bigwig ...` / `--modality ... --star-junctions
+   ...` flag groups in `workflows/05-full_finetuning/Snakefile`. The JAX
+   driver only ever trained the 3 splice heads — this was a real,
+   consequential scope cut (flagged in the original plan as "tracked as
+   follow-up work, not done here"), not a hidden bug, but it means the run
+   wasn't comparable to the paper run it's supposed to cross-check. Fixing
+   this now (see "rna_seq joint training" below).
+
+2. **Checkpoint/output design was backwards relative to what workflow 05
+   already does correctly.** The JAX rule declared its Snakemake `output:`
+   as the mutable, continuously-overwritten `last/` checkpoint directory
+   that `--resume auto` also depends on for its own bookkeeping. Combined
+   with `--rerun-incomplete` (used in every submission command in this repo,
+   per `README.md`), this is actively dangerous: when a run gets killed
+   mid-epoch (e.g. a partition wall-time limit) and Snakemake retries the
+   rule, `--rerun-incomplete` deletes the declared-incomplete output
+   directory *before* rerunning — wiping the checkpoint the resume logic
+   needed. Confirmed on disk: after job `27358332` was killed at the `gpu`
+   partition's 12h QOS limit mid-epoch-2, Snakemake's retry (job `27373239`)
+   found no `last/train_state.json`, fell back to a cold start, and reran
+   `--rope-init` reinit — silently destroying epoch 1's trained weights. The
+   run was manually stopped once this was discovered.
+
+   `workflows/05-full_finetuning/Snakefile` never has this problem because
+   its declared `output:` is `checkpoint_epoch{N}.pth` — the **final**
+   epoch's checkpoint, written exactly once, at the very end, by a script
+   that manages its *own* intermediate/resumable state (`--resume auto`,
+   per-epoch checkpoints, `epoch_log.csv`) entirely outside anything
+   Snakemake tracks or can delete. Fix: mirror this pattern exactly — change
+   the JAX rule's output to a final-epoch marker distinct from the directory
+   `--resume auto` reads/writes, so `--rerun-incomplete` can never touch the
+   resumable state.
+
+### rna_seq joint training: design
+
+`alphagenome_ft` has two independent data modules with **identical batch
+schemas** (`sequences`, `negative_strand_mask`, `targets_{head_id}` — see
+`BigWigDataModule._make_batch` and `SpliceDataModule._make_batch`, both in
+the `alphagenome_ft` repo): `BigWigDataModule` (bigwig-driven, used for
+`rna_seq`) and `SpliceDataModule` (STAR/SSU-driven, used for the 3 splice
+heads). Neither has ever been combined into one joint-modality batch before
+(this is exactly the gap the original plan flagged).
+
+Verified this is safely composable **without** modifying either class's
+internals, by construction rather than by hoping their independent shuffles
+happen to line up:
+
+- Both classes' `iter_batches` shuffle via `np.random.default_rng(seed)`
+  over `np.arange(len(windows))` — the resulting permutation depends only on
+  `(len(windows), seed)`, not on window content. So two data modules built
+  from the *same window list, same order, same length* and driven with the
+  *same seed* per epoch will always yield batch `k` over the *same windows*,
+  in lock-step, with no risk of silent misalignment — confirmed by reading
+  both `iter_batches` implementations directly (`alphagenome_ft/finetune/
+  data.py` and `alphagenome_ft/finetune/splice_data.py`).
+- `SpliceDataModule(..., filter_to_junctions=False)` is confirmed (read the
+  `__init__` directly) to store `intervals` completely unmodified in that
+  case — no other filtering happens internally.
+- `BigWigDataModule.__init__` filters intervals to chromosomes common to all
+  configured bigwigs. Apply that same filter to the interval list *before*
+  constructing both modules (reusing `BigWigDataModule
+  ._get_common_bigwig_chromosomes`), so both modules end up with the
+  identical filtered list.
+- A `CombinedDataModule` wrapper (new, in the driver script — thin
+  composition, not a library change) owns one `BigWigDataModule` (rna_seq)
+  and one `SpliceDataModule` (3 splice heads) built this way, exposes
+  `_intervals`/`_batch_size`/`_drop_last` (train() already reads these
+  directly off whatever `data_module` it's given), and its own
+  `iter_batches` zips the two sub-iterators, asserting `sequences` arrays
+  are identical between them every batch as a cheap, strong runtime
+  correctness check (they must be — same windows, same FASTA) before
+  merging in `targets_rna_seq` alongside the splice targets.
+- `--filter-to-junctions` therefore also needs to default to False for this
+  run to be a fair comparison anyway: PyTorch's full run trains over the
+  *entire* FOLD_1 split (41,699 train / 6,323 val intervals per `README.md`)
+  with no junction-presence filtering, so removing JAX's junction filter
+  isn't just an engineering convenience for the lock-step alignment — it's
+  also more faithful to what the PyTorch run actually does.
+- Modality weights: PyTorch's probing run uses `1.0` for all 4 heads, and
+  JAX's `train()` already sums per-head losses unweighted (equivalent to
+  all-1.0 weights) — no gap for *this specific* run; a real per-head-weight
+  parameter would only be needed for a differently-weighted run.
+
+### Pretrained head init (`splice_site:0`) — now implemented
+
+PyTorch's probing run uses `--pretrained-head-samples
+"rna_seq:NA,splice_usage:NA,splice_junctions:NA,splice_site:0"` — the
+`splice_site` head's weights are initialized from the pretrained model's own
+standard splice-site head, not randomly (the other three heads stay
+randomly initialized either way — "NA"). Originally flagged as a deferred
+gap (`alphagenome_ft` had no equivalent mechanism), now implemented as
+`_init_splice_site_from_pretrained` in the driver script.
+
+Checked directly against `transfer.py`: for `splice_site` specifically,
+PyTorch's `:0` is an *organism* index (`sd[pt_key][organism_idx:organism_idx+1]`),
+not a tissue/track index — the classification output is a fixed 5-class
+head, not per-tissue, so "Fixed 5-class output: copy full pretrained weight
+matrix directly" (PyTorch's own comment) is describing an organism-index
+slice, not a track selection.
+
+On the JAX side: `create_model_with_heads`'s param-merging keeps the
+pretrained model's full param tree in `model._params` even for standard
+heads our forward pass never touches (confirmed by reading `merge_params`
+directly), so the pretrained `splice_sites_classification` head's weights
+were already present, unused, at
+`alphagenome/head/splice_sites_classification/multi_organism_linear`. Two
+things had to be verified empirically rather than assumed, both via a real
+`create_model_with_heads()` build submitted through SLURM (a `salloc
+--no-shell` + repeated `srun --jobid=...` allocation, not the login node):
+1. That key really exists post-merge with the expected shape
+   (`{'b': (2, 5), 'w': (2, 1536, 5)}` — organism axis first).
+2. Our own custom head's matching parameter is **not** the same shape —
+   built for a single `--organism`, it's single-organism
+   (`{'b': (1, 5), 'w': (1, 1536, 5)}`). First implementation attempt
+   assumed the shapes matched and copied wholesale; this failed loudly (the
+   function's own shape-check raised) rather than silently training on a
+   mismatched copy. Fixed by slicing the pretrained tensor to
+   `organism_index` (default 0 = human) before copying — which also makes
+   this a more faithful mirror of PyTorch's own `organism_idx` slice than
+   the original "copy both organisms" plan would have been.
+
+Verified end-to-end (SLURM, not login node): building the real model, the
+params visibly change from their random init, and the new value matches
+`pretrained[organism_index=0]` exactly.
+
 ## Dependency upgrade (2026-08-06/07): alphagenome/alphagenome_research pinned to latest
 
 Per explicit direction to use the latest versions of everything, upgraded in

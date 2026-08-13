@@ -5,13 +5,18 @@ JAX/alphagenome_research analogue of alphagenome-pytorch's
 workflows/05-full_finetuning/Snakefile and
 plans/10-jax-alphagenome_ft-reproduction.md for the settings this mirrors).
 
-Scope note: this reproduces the three splice heads only
-(splice_sites_classification, splice_sites_usage, splice_sites_junction) via
-alphagenome_ft.finetune.splice_data.SpliceDataModule. Unlike the PyTorch run,
-rna_seq is NOT trained jointly here — alphagenome_ft has no data module that
-feeds both bigwig-derived (rna_seq) and STAR-derived (splice) targets in the
-same batch/optimizer step yet. Adding that is tracked as follow-up work in
-the plan doc, not done here.
+Scope: reproduces all 4 modalities the PyTorch probing run trains jointly —
+rna_seq (bigwig-derived) plus the three splice heads (STAR/SSU-derived) — by
+combining alphagenome_ft.finetune.data.BigWigDataModule and
+finetune.splice_data.SpliceDataModule via the local CombinedDataModule below.
+Neither data module has ever been combined like this in alphagenome_ft
+before; see plans/10-jax-alphagenome_ft-reproduction.md ("rna_seq joint
+training: design") for why this is safe (identical batch schema, and
+identical-by-construction window lists/order/seed make both modules' index
+shuffles align in lock-step, verified by reading both iter_batches directly
+rather than assumed) and for the CombinedDataModule docstring below for the
+runtime safety check that would catch it immediately if that ever stopped
+holding.
 
 Gradient accumulation: alphagenome_ft.finetune.train.train() originally took
 one full optimizer step per data_module batch with no accumulation loop, so it
@@ -87,6 +92,62 @@ def _load_interval_list(bed_path: Path, window_size: int):
     return intervals
 
 
+class CombinedDataModule:
+    """Zips a BigWigDataModule (rna_seq) and a SpliceDataModule (3 splice
+    heads) into one joint-modality batch per step, matching the PyTorch
+    probing run's --modality bigwig ... --modality splicing ... (all 4 heads
+    trained together).
+
+    train() only ever reads `_intervals`/`_batch_size`/`_drop_last` and calls
+    `iter_batches` on whatever data_module it's given (see
+    alphagenome_ft.finetune.train.train) - this wrapper needs no changes to
+    either underlying data module.
+
+    Safety: both underlying modules must be constructed from the identical
+    window list/order (see module docstring and the plan doc for why this
+    makes their independent index shuffles align in lock-step). Rather than
+    just trust that, `iter_batches` asserts the two modules' `sequences`
+    arrays are byte-identical every single batch - same windows extracted via
+    the same FASTA must produce the same encoded sequence, so any mismatch
+    (a future alphagenome_ft change reordering internally, a filtering
+    difference introduced later, etc.) surfaces immediately as a loud error
+    instead of silently training on misaligned targets.
+    """
+
+    def __init__(self, bigwig_module, splice_module):
+        for split in ("train", "valid"):
+            n_bw = len(bigwig_module._intervals.get(split, ()))
+            n_sp = len(splice_module._intervals.get(split, ()))
+            if n_bw != n_sp:
+                raise ValueError(
+                    f"CombinedDataModule: {split} window count mismatch "
+                    f"(bigwig={n_bw}, splice={n_sp}) - the two modules were "
+                    f"not built from the same window list, so their "
+                    f"per-batch shuffles cannot be assumed to align."
+                )
+        self._bigwig = bigwig_module
+        self._splice = splice_module
+        self._intervals = splice_module._intervals
+        self._batch_size = splice_module._batch_size
+        self._drop_last = splice_module._drop_last
+
+    def iter_batches(self, split: str, *, seed: int | None = None):
+        for bw_batch, sp_batch in zip(
+            self._bigwig.iter_batches(split, seed=seed),
+            self._splice.iter_batches(split, seed=seed),
+        ):
+            if not np.array_equal(bw_batch["sequences"], sp_batch["sequences"]):
+                raise RuntimeError(
+                    "CombinedDataModule: bigwig and splice batches disagree on "
+                    "'sequences' for the same batch index - the two data "
+                    "modules' window order has desynchronized. Refusing to "
+                    "train on what would be misaligned targets."
+                )
+            combined = dict(sp_batch)
+            combined["targets_rna_seq"] = bw_batch["targets_rna_seq"]
+            yield combined
+
+
 _JUNCTION_ROPE_SUBMODULES = (
     "pos_donor_logits", "pos_acceptor_logits", "neg_donor_logits", "neg_acceptor_logits",
 )
@@ -129,6 +190,68 @@ def _reinit_junction_rope_embeddings(model, head_id: str, std: float, seed: int)
         )
 
 
+_PRETRAINED_SPLICE_SITE_KEY = "alphagenome/head/splice_sites_classification/multi_organism_linear"
+
+
+def _init_splice_site_from_pretrained(model, head_id: str, organism_index: int = 0) -> None:
+    """Initialize a custom splice_site head from the pretrained model's own
+    standard splice-site classification head, matching alphagenome-pytorch's
+    ``--pretrained-head-samples "splice_site:0"`` (see
+    workflows/05-full_finetuning/Snakefile).
+
+    alphagenome-pytorch's transfer.py comment for this modality: "Fixed
+    5-class output: copy full pretrained weight matrix directly" — unlike
+    other modalities' per-track slicing, splice_site's classification output
+    isn't per-tissue, so there is nothing to select a track of; PyTorch's
+    ``:0`` there is an *organism* index (``sd[pt_key][organism_idx:organism_idx+1]``),
+    not a tissue/track index, and this mirrors exactly that.
+
+    In this JAX port, `create_model_with_heads`'s param-merging keeps the
+    pretrained model's full param tree in `model._params` even for standard
+    heads never used by our forward pass (confirmed by reading
+    `merge_params` in alphagenome_ft/custom_model.py directly - it appends
+    "any keys only in pretrained" after merging our custom heads' keys), so
+    the pretrained splice_sites_classification head's weights are already
+    sitting in `model._params` unused, under a different module path than
+    our own custom-named head.
+
+    Both are the same predefined head kind (`splice_sites_classification`),
+    but NOT the same shape: the pretrained model's own head is multi-organism
+    ({'b': (2, 5), 'w': (2, 1536, 5)}, confirmed by direct checkpoint
+    inspection), while our custom head — built for a single
+    --organism — is single-organism ({'b': (1, 5), 'w': (1, 1536, 5)},
+    confirmed by a real create_model_with_heads() build). Slice the
+    pretrained tensor down to `organism_index` (0 = human) before copying,
+    matching PyTorch's own organism_idx slice exactly rather than assuming
+    the shapes already match.
+    """
+    dst_key = f"head/{head_id}/multi_organism_linear"
+    if _PRETRAINED_SPLICE_SITE_KEY not in model._params:
+        raise KeyError(
+            f"Expected pretrained standard head at "
+            f"'{_PRETRAINED_SPLICE_SITE_KEY}' not found in model params — "
+            f"alphagenome_research's splice_sites_classification head "
+            f"parameter naming may have changed."
+        )
+    if dst_key not in model._params:
+        raise KeyError(
+            f"Expected custom head at '{dst_key}' not found in model params."
+        )
+    src_full = model._params[_PRETRAINED_SPLICE_SITE_KEY]
+    sliced = {
+        k: v[organism_index:organism_index + 1] for k, v in src_full.items()
+    }
+    sliced_shapes = {k: v.shape for k, v in sliced.items()}
+    dst_shapes = {k: v.shape for k, v in model._params[dst_key].items()}
+    if sliced_shapes != dst_shapes:
+        raise ValueError(
+            f"Shape mismatch initializing '{dst_key}' from pretrained "
+            f"'{_PRETRAINED_SPLICE_SITE_KEY}'[organism_index={organism_index}]: "
+            f"{dst_shapes} vs {sliced_shapes}."
+        )
+    model._params[dst_key] = sliced
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint-path", required=True, type=Path,
@@ -139,6 +262,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--genome", required=True, type=Path, help="Reference FASTA.")
     parser.add_argument("--train-bed", required=True, type=Path)
     parser.add_argument("--val-bed", required=True, type=Path)
+    parser.add_argument("--bigwig", required=True, nargs="+",
+                         help="Bigwig files driving a single rna_seq head's "
+                              "targets (one track per file), matching the "
+                              "PyTorch probing run's --modality rna_seq "
+                              "--bigwig ... (2 samples x fwd/rev strand = 4 "
+                              "files/tracks there).")
     parser.add_argument("--star-junctions", required=True, nargs="+",
                          help="STAR SJ.out.tab files, one per sample.")
     parser.add_argument("--ssu", nargs="+", default=None,
@@ -198,12 +327,6 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--max-train-steps", type=int, default=None,
                          help="Optional global cap on optimizer updates, for "
                               "quick smoke-test runs before a full finetune.")
-    parser.add_argument("--filter-to-junctions", action=argparse.BooleanOptionalAction,
-                         default=True,
-                         help="Discard intervals with no complete splice "
-                              "junction (default True; SpliceDataModule's own "
-                              "default). Useful to disable for tiny debug "
-                              "interval sets that may not contain a junction.")
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--organism", default="HOMO_SAPIENS")
     parser.add_argument("--output-dir", required=True, type=Path)
@@ -228,6 +351,7 @@ def main() -> None:
     # Imports deferred past argparse so --help works without a full JAX install.
     from alphagenome_ft import create_model_with_heads, load_checkpoint
     from alphagenome_ft.finetune import config as ft_config
+    from alphagenome_ft.finetune.data import BigWigDataModule
     from alphagenome_ft.finetune.splice_data import SpliceDataModule
     from alphagenome_ft.finetune.train import register_predefined_heads, train as run_train
 
@@ -258,6 +382,13 @@ def main() -> None:
             if args.junction_position_source == "predicted":
                 entry["classification_head_id"] = head_ids["splice_sites_classification"]
         heads_cfg.append(entry)
+
+    heads_cfg.append({
+        "id": "rna_seq",
+        "source": "predefined",
+        "kind": "rna_seq",
+        "targets": [{"path": str(bw)} for bw in args.bigwig],
+    })
 
     specs = ft_config.prepare_head_specs(
         {"heads": heads_cfg}, organism=args.organism,
@@ -305,10 +436,26 @@ def main() -> None:
                 model, head_ids["splice_sites_junction"], std=args.rope_init_std, seed=args.seed,
             )
 
+        print("Initializing splice_site head from the pretrained model's own "
+              "standard splice-site classification head (matches "
+              "alphagenome-pytorch's --pretrained-head-samples splice_site:0; "
+              "see _init_splice_site_from_pretrained docstring).")
+        _init_splice_site_from_pretrained(model, head_ids["splice_sites_classification"])
+
     intervals = {
         "train": _load_interval_list(args.train_bed, window_size=args.sequence_length),
         "valid": _load_interval_list(args.val_bed, window_size=args.sequence_length),
     }
+
+    # Pre-filter to chromosomes common to all --bigwig files using
+    # BigWigDataModule's own helper, and construct BOTH data modules from
+    # this identical, already-filtered interval dict (not the raw intervals
+    # above) — this is what makes CombinedDataModule's lock-step zip safe;
+    # see its docstring and the plan doc.
+    rna_seq_spec = next(spec for spec in specs if spec.head_id == "rna_seq")
+    intervals = BigWigDataModule._filter_intervals_by_bigwig_chromosomes(
+        intervals, [rna_seq_spec],
+    )
 
     # SpliceDataModule's own head-kind vocabulary ("splice_sites",
     # "splice_site_usage", "splice_junctions") differs from
@@ -322,7 +469,7 @@ def main() -> None:
         "splice_junctions": head_ids["splice_sites_junction"],
     }
 
-    data_module = SpliceDataModule(
+    splice_module = SpliceDataModule(
         intervals=intervals,
         fasta_path=args.genome,
         star_junction_files=args.star_junctions,
@@ -334,8 +481,23 @@ def main() -> None:
         max_splice_sites=args.max_splice_sites,
         drop_last=args.num_devices > 1,
         emit_raw_junction_events=(args.junction_position_source == "predicted"),
-        filter_to_junctions=args.filter_to_junctions,
+        # Always False, not a CLI flag: CombinedDataModule requires both
+        # underlying modules to share the identical window list (see its
+        # docstring and the plan doc), and this also matches the PyTorch
+        # probing run, which trains over the entire FOLD_1 split with no
+        # junction-presence filter (README.md: 41,699 train / 6,323 val
+        # intervals).
+        filter_to_junctions=False,
     )
+    bigwig_module = BigWigDataModule(
+        intervals=intervals,
+        fasta_path=args.genome,
+        head_specs=[rna_seq_spec],
+        batch_size=args.batch_size,
+        shuffle=True,
+        drop_last=args.num_devices > 1,
+    )
+    data_module = CombinedDataModule(bigwig_module, splice_module)
 
     run_train(
         model,
@@ -355,6 +517,14 @@ def main() -> None:
         verbose=True,
     )
 
+    # Distinct from checkpoint_dir/{last,best} (which --resume auto reads/
+    # writes across invocations): this is the Snakemake rule's declared
+    # output. Keeping them separate means --rerun-incomplete only ever
+    # deletes this marker on a killed/incomplete run, never the resumable
+    # checkpoint state - see the "Redo" section of the plan doc for why the
+    # opposite (declaring last/ itself as the output) silently destroyed a
+    # real run's progress.
+    (checkpoint_dir / "training_complete.marker").touch()
     print(f"Done! Checkpoints written under {checkpoint_dir}")
 
 
