@@ -1,5 +1,96 @@
 # Plan: reproduce paper probing/LoRA runs with `alphagenome_ft` (JAX)
 
+## Equivalence review (2026-08-13): systematic pass against workflows/05-full_finetuning/Snakefile
+
+Went through every flag in the PyTorch probing run's actual shell command
+(`workflows/05-full_finetuning/Snakefile`'s `torchrun ... scripts/finetune.py`
+invocation) one at a time and checked the JAX driver's equivalent. Fixed real
+gaps found (see commits in both repos, same date):
+
+- **`--pretrained-head-samples "...splice_site:0"`**: implemented
+  (`_init_splice_site_from_pretrained`).
+- **`--resume auto`**: implemented, and extended beyond PyTorch's own scope —
+  restores optimizer (Adam) state too (`opt_state` sidecar), and resumes
+  mid-epoch via `--save-every-steps` (see below), not just at epoch
+  boundaries.
+- **`--save-every-steps 250`**: implemented (JAX had none before — only
+  epoch-boundary checkpoints, which combined with ~10h epochs on a
+  wall-time-limited partition meant losing a whole epoch's progress per
+  kill, not just progress since the last checkpoint).
+- **`--max-grad-norm 1.0`**: implemented. Found `alphagenome_ft.finetune.
+  train.train()` had a *local* `create_optimizer` that duplicated and
+  shadowed the module-level import of `alphagenome_ft.optimizer_utils.
+  create_optimizer` — the local one had no clipping support, so
+  `train()` had no way to request it at all. Removed the local duplicate;
+  the (already clip-capable) import is what runs now.
+- **`--gradient-checkpointing`**: implemented (`gradient_checkpointing`
+  param, `jax.checkpoint` wrapping the backbone). Confirmed inert for this
+  specific run in both ports (frozen-backbone path never backprops into the
+  trunk at all — PyTorch's `torch.no_grad()`, JAX's `detach_backbone`); kept
+  for parity and for future non-frozen modes.
+- **`--modality rna_seq --bigwig ...`** (joint 4-modality training):
+  implemented via the new `CombinedDataModule` (see below in this doc for
+  the original design writeup).
+- **Snakemake output/checkpoint design**: fixed to mirror this same
+  PyTorch workflow's pattern (final-artifact-only `output:`, not the
+  resumable checkpoint directory itself) — was backwards before and
+  `--rerun-incomplete` silently destroyed a real run's progress as a
+  result. See the "Problem 2" section below for the incident.
+
+**Confirmed equivalent without any code change** (traced the actual value/
+mechanism on both sides rather than assuming):
+
+- `--min-alpha-juncs 0`: this value means "disable alpha-based usage-loss
+  masking" on the PyTorch side (`training.py`); JAX's real
+  `SpliceSitesUsageHead.loss` has no such masking to begin with, so "off"
+  already matches "off." Would need real implementation work only if a
+  *nonzero* min-alpha-juncs run were ever needed.
+- `{lr_schedule_args}` (`--warmup-steps 0 --lr-schedule constant` for the
+  probing run): JAX's `create_optimizer` takes a plain scalar
+  `learning_rate` with no schedule concept at all — which is already
+  exactly "constant, no warmup." Only a gap for a *different* run that
+  needed an actual schedule (e.g. cosine/warmup).
+- `--no-val-pearson`: PyTorch-only metric: JAX's `train()` never computes a
+  Pearson correlation validation metric to begin with, so there's nothing
+  to disable.
+- `--modality-weights "...:1.0,...:1.0,...:1.0,...:1.0"` (all 1.0): JAX's
+  `train()` sums per-head losses unweighted — already exactly equivalent to
+  all-1.0 weights. Would need a real weights parameter only for a
+  differently-weighted run.
+- `--num-workers`: PyTorch DataLoader worker count, no JAX equivalent needed
+  (different data-loading architecture; doesn't affect training outputs,
+  only throughput).
+
+**Known gap, NOT fixed — real, and feasibility is unclear:**
+
+- **`--track-means-samples 1000`**: PyTorch computes real per-track nonzero
+  means from 1000 sampled windows (`compute_track_means`) and the rna_seq
+  head *divides its output by `track_means * resolution` on every forward
+  pass* (`alphagenome_pytorch/heads.py` — `GenomeTracksHead`, confirmed by
+  reading the actual tensor op, not just the docstring) — a real, active
+  part of training dynamics for this run, not a no-op default (default
+  when omitted is `torch.ones(...)`, i.e. no scaling, but the probing run
+  does *not* omit it).
+
+  `alphagenome_ft`'s config schema has a matching-looking `nonzero_mean`
+  field per track (`finetune/config.py`, with a docstring example showing
+  exactly this use case) — but grepped the entire `alphagenome_ft`
+  repository for `nonzero_mean`: it is parsed into `TrackInfo` and
+  **never read again anywhere**. It's a documented but unimplemented field,
+  not a working equivalent.
+
+  Not fixed this pass because the feasibility itself is unknown:
+  `alphagenome_ft` calls `alphagenome_research`'s real predefined rna_seq
+  head directly (no local reimplementation, consistent with every other
+  head in this codebase) — unlike PyTorch's own `GenomeTracksHead`
+  reimplementation, there may be no hook in the *real* DeepMind head class
+  to inject an equivalent per-track output scaling at all. Needs its own
+  investigation (does the real head accept anything like this natively?
+  if not, is monkey-patching/wrapping its forward pass even feasible,
+  the way `detach_backbone`/`gradient_checkpointing` wrap `forward_trunk`?)
+  before attempting an implementation — flagging explicitly rather than
+  either silently skipping it or guessing at a fix.
+
 ## Redo (2026-08-13): make the probing run genuinely equivalent to PyTorch's
 
 The first real submission attempt surfaced two problems, both now understood
