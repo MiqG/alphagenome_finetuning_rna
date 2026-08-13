@@ -117,6 +117,11 @@ finetuning:
       # mid-epoch checkpointing so a kill on a wall-time-limited partition
       # loses at most this many optimizer steps, not the whole ~10h epoch.
       save_every_steps: 250
+      # Matches finetuning.alphagenome.sf3b1mut.track_means_samples (PyTorch) —
+      # windows sampled to compute each rna_seq bigwig track's nonzero_mean,
+      # which the real predefined rna_seq head uses to rescale predictions/
+      # targets on every forward pass.
+      track_means_samples: 1000
 
 preprocessing:
   overfitting:

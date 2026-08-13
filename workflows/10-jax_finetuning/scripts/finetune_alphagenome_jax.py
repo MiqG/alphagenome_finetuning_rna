@@ -92,6 +92,76 @@ def _load_interval_list(bed_path: Path, window_size: int):
     return intervals
 
 
+def _compute_track_means(
+    bigwig_files, bed_path: Path, sequence_length: int, max_samples: int | None,
+) -> list[float]:
+    """Compute nonzero_mean per rna_seq track, matching alphagenome-pytorch's
+    datasets.py::compute_track_means exactly (same centering/expansion logic,
+    same deterministic every-Nth subsetting, same nonzero-mean formula,
+    resolution 1) — ported line-for-line rather than approximated, since this
+    directly feeds a real, active part of training dynamics (see
+    plans/10-jax-alphagenome_ft-reproduction.md, "track-means-samples").
+
+    Unlike PyTorch's version this has no strand_pair_groups support: the
+    probing run's workflow (workflows/05-full_finetuning/Snakefile) never
+    passes --strand-pairs for the rna_seq modality, so PyTorch's own
+    modality_strand_pairs['rna_seq'] is empty there too — nothing to mirror
+    for this specific run.
+    """
+    import pyBigWig
+
+    raw_intervals = []
+    opened = gzip.open if str(bed_path).endswith(".gz") else open
+    with opened(bed_path, "rt") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            chrom, start_str, end_str = line.split()[:3]
+            raw_intervals.append((chrom, int(float(start_str)), int(float(end_str))))
+
+    bws = [pyBigWig.open(str(p)) for p in bigwig_files]
+    n_tracks = len(bws)
+    try:
+        chrom_sizes = dict(bws[0].chroms())
+        half_len = sequence_length // 2
+        valid_positions = []
+        for chrom, start, end in raw_intervals:
+            if chrom not in chrom_sizes:
+                continue
+            center = (start + end) // 2
+            final_start = center - half_len
+            final_end = center + half_len
+            if final_start < 0 or final_end > chrom_sizes[chrom]:
+                continue
+            valid_positions.append((chrom, final_start, final_end))
+
+        if max_samples is not None and len(valid_positions) > max_samples:
+            step = len(valid_positions) // max_samples
+            valid_positions = valid_positions[::step][:max_samples]
+
+        if not valid_positions:
+            raise ValueError("No valid positions found for computing track means.")
+
+        sums = np.zeros(n_tracks, dtype=np.float64)
+        counts = np.zeros(n_tracks, dtype=np.int64)
+        for chrom, start, end in valid_positions:
+            for i, bw in enumerate(bws):
+                values = bw.values(chrom, start, end, numpy=True)
+                values = np.nan_to_num(np.asarray(values, dtype=np.float32), nan=0.0)
+                nonzero = values[values != 0]
+                sums[i] += nonzero.sum()
+                counts[i] += len(nonzero)
+    finally:
+        for bw in bws:
+            bw.close()
+
+    means = np.where(counts > 0, sums / counts, 1.0)
+    print(f"Computed nonzero_mean per rna_seq track ({len(valid_positions)} "
+          f"sampled windows): {means}", flush=True)
+    return means.tolist()
+
+
 class CombinedDataModule:
     """Zips a BigWigDataModule (rna_seq) and a SpliceDataModule (3 splice
     heads) into one joint-modality batch per step, matching the PyTorch
@@ -268,6 +338,17 @@ def _parse_args() -> argparse.Namespace:
                               "PyTorch probing run's --modality rna_seq "
                               "--bigwig ... (2 samples x fwd/rev strand = 4 "
                               "files/tracks there).")
+    parser.add_argument("--track-means-samples", type=int, default=None,
+                         help="Number of --train-bed windows to sample when "
+                              "computing each rna_seq bigwig track's "
+                              "nonzero_mean (default: all). Matches "
+                              "alphagenome-pytorch's --track-means-samples — "
+                              "the real predefined rna_seq head "
+                              "(alphagenome_research.model.heads) rescales "
+                              "predictions/targets by this on every forward "
+                              "pass when present; omit only to fall back to "
+                              "no scaling (all-ones), which is NOT what the "
+                              "probing run does.")
     parser.add_argument("--star-junctions", required=True, nargs="+",
                          help="STAR SJ.out.tab files, one per sample.")
     parser.add_argument("--ssu", nargs="+", default=None,
@@ -398,11 +479,17 @@ def main() -> None:
                 entry["classification_head_id"] = head_ids["splice_sites_classification"]
         heads_cfg.append(entry)
 
+    track_means = _compute_track_means(
+        args.bigwig, args.train_bed, args.sequence_length, args.track_means_samples,
+    )
     heads_cfg.append({
         "id": "rna_seq",
         "source": "predefined",
         "kind": "rna_seq",
-        "targets": [{"path": str(bw)} for bw in args.bigwig],
+        "targets": [
+            {"path": str(bw), "nonzero_mean": mean}
+            for bw, mean in zip(args.bigwig, track_means)
+        ],
     })
 
     specs = ft_config.prepare_head_specs(

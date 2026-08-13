@@ -143,6 +143,7 @@ rule jax_full_finetune:
         gradient_accumulation_steps = SF3B1_FT_CFG["gradient_accumulation_steps"],
         num_devices     = SF3B1_FT_CFG["num_devices"],
         save_every_steps = SF3B1_FT_CFG["save_every_steps"],
+        track_means_samples = SF3B1_FT_CFG["track_means_samples"],
         output_dir      = OUTPUT_DIR,
     threads: SF3B1_FT_CFG["num_devices"] * 8
     resources:
@@ -178,6 +179,7 @@ rule jax_full_finetune:
             --train-bed {input.train_bed} \
             --val-bed {input.val_bed} \
             --bigwig {input.bigwigs} \
+            --track-means-samples {params.track_means_samples} \
             --star-junctions {input.star_junctions} \
             --ssu {input.ssu_parquets} \
             --junction-position-source {params.junction_position_source} \
