@@ -190,6 +190,7 @@ rule jax_full_finetune:
             --gradient-accumulation-steps {params.gradient_accumulation_steps} \
             --num-devices {params.num_devices} \
             --save-every-steps {params.save_every_steps} \
+            --max-grad-norm 1.0 \
             --gradient-checkpointing \
             --resume auto \
             --seed 1234 \

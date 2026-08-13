@@ -336,6 +336,11 @@ def _parse_args() -> argparse.Namespace:
                               "gpu partition's MIG slice caps wall-time at "
                               "12h, so epoch-end-only checkpointing risks "
                               "losing a whole epoch's progress per kill.")
+    parser.add_argument("--max-grad-norm", type=float, default=1.0,
+                         help="Clip gradients to this global norm before the "
+                              "optimizer update. Matches alphagenome-pytorch's "
+                              "--max-grad-norm (also hardcoded to 1.0 there). "
+                              "Pass 0 or a negative value to disable clipping.")
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--organism", default="HOMO_SAPIENS")
     parser.add_argument("--output-dir", required=True, type=Path)
@@ -525,6 +530,7 @@ def main() -> None:
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         resume_from=resume_dir if do_resume else None,
         save_every_steps=args.save_every_steps,
+        gradient_clip_global_norm=args.max_grad_norm if args.max_grad_norm > 0 else None,
         verbose=True,
     )
 
