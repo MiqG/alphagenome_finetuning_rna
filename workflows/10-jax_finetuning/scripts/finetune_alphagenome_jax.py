@@ -340,8 +340,9 @@ def _parse_args() -> argparse.Namespace:
                               "continue epoch/global_step bookkeeping from "
                               "there instead of --rope-init reinit + fresh "
                               "pretrained weights. 'none' always starts fresh. "
-                              "Mirrors alphagenome-pytorch's --resume auto. "
-                              "Optimizer state (Adam moments) is never resumed.")
+                              "Also restores optimizer (Adam) state from an "
+                              "opt_state sidecar there, if present. Mirrors "
+                              "alphagenome-pytorch's --resume auto.")
     return parser.parse_args()
 
 
