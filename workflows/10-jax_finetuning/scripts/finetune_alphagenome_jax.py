@@ -201,10 +201,10 @@ class CombinedDataModule:
         self._batch_size = splice_module._batch_size
         self._drop_last = splice_module._drop_last
 
-    def iter_batches(self, split: str, *, seed: int | None = None):
+    def iter_batches(self, split: str, *, seed: int | None = None, skip_batches: int = 0):
         for bw_batch, sp_batch in zip(
-            self._bigwig.iter_batches(split, seed=seed),
-            self._splice.iter_batches(split, seed=seed),
+            self._bigwig.iter_batches(split, seed=seed, skip_batches=skip_batches),
+            self._splice.iter_batches(split, seed=seed, skip_batches=skip_batches),
         ):
             if not np.array_equal(bw_batch["sequences"], sp_batch["sequences"]):
                 raise RuntimeError(
