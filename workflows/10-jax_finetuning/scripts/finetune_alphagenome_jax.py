@@ -490,6 +490,13 @@ def main() -> None:
             {"path": str(bw), "nonzero_mean": mean}
             for bw, mean in zip(args.bigwig, track_means)
         ],
+        # Native GenomeTracksHeadConfig defaults to resolutions=[1, 128] and
+        # GenomeTracksHead.loss() sums a separate multinomial-loss term per
+        # resolution (sum-pooling 1bp targets to 128bp for the second term) -
+        # without this override the rna_seq head trains against an extra,
+        # unwanted 128bp loss term the PyTorch reference never computes
+        # (its config.json has modality_resolutions: {"rna_seq": [1]}).
+        "resolutions": [1],
     })
 
     specs = ft_config.prepare_head_specs(
