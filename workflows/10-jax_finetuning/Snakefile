@@ -42,7 +42,23 @@ CHECKPOINT_CACHE_DIR = FT_CFG["checkpoint_cache_dir"]
 
 SCRIPTS_DIR = os.path.join(os.path.dirname(workflow.snakefile), "scripts")
 
-RUN_NAME = "randinit__annotated__frozen__probing_jax"
+# One entry per parallel run (config["finetuning"]["alphagenome_ft"]["sf3b1mut"]["runs"]),
+# mirroring workflows/05-full_finetuning/Snakefile's ALL_RUNS dict + {run_name}
+# wildcard pattern, keyed by run_name (not the config's own short keys) so the
+# wildcard matches 1:1 against each run's actual --run-name/output directory.
+ALL_RUNS = {
+    run_cfg["run_name"]: run_cfg
+    for run_cfg in SF3B1_FT_CFG["runs"].values()
+}
+
+
+def _mode_args(wildcards):
+    cfg = ALL_RUNS[wildcards.run_name]
+    if cfg["mode"] == "lora":
+        return "--mode lora --lora-rank {} --lora-alpha {} --lora-targets {}".format(
+            cfg["lora_rank"], cfg["lora_alpha"], cfg["lora_targets"],
+        )
+    return "--mode linear-probe"
 
 # GPU target for jax_full_finetune, overridable via --config gpu_target=mig.
 # "h100" (default): gpu_diasfrazer's single non-MIG H100 — no partition time
@@ -65,7 +81,10 @@ GPU_CFG = GPU_PRESETS[config.get("gpu_target", "h100")]
 
 rule all:
     input:
-        os.path.join(OUTPUT_DIR, RUN_NAME, "training_complete.marker"),
+        expand(
+            os.path.join(OUTPUT_DIR, "{run_name}", "training_complete.marker"),
+            run_name=list(ALL_RUNS.keys()),
+        ),
 
 
 rule download_alphagenome_jax_weights:
@@ -100,7 +119,14 @@ rule download_alphagenome_jax_weights:
 
 
 rule jax_full_finetune:
-    """4-modality (rna_seq + 3 splice heads) probing finetune on the full FOLD_1 train/val split."""
+    """4-modality (rna_seq + 3 splice heads) finetune on the full FOLD_1 train/val split.
+
+    {run_name} wildcard selects among ALL_RUNS (probing vs lora, see
+    _mode_args) — matches workflows/05-full_finetuning/Snakefile's pattern of
+    one rule driving multiple parallel runs via a run_name-keyed config dict.
+    """
+    wildcard_constraints:
+        run_name = "|".join(ALL_RUNS.keys()),
     input:
         checkpoint_path_file = os.path.join(CHECKPOINT_CACHE_DIR, "checkpoint_path.txt"),
         genome         = config["gencode"]["paths"]["fasta"],
@@ -128,11 +154,12 @@ rule jax_full_finetune:
         # section: declaring the resumable directory itself as the output
         # is what let --rerun-incomplete silently wipe a real run's
         # progress.
-        marker = os.path.join(OUTPUT_DIR, RUN_NAME, "training_complete.marker"),
+        marker = os.path.join(OUTPUT_DIR, "{run_name}", "training_complete.marker"),
     benchmark:
-        os.path.join(OUTPUT_DIR, "benchmarks", RUN_NAME, "jax_full_finetune.tsv")
+        os.path.join(OUTPUT_DIR, "benchmarks", "{run_name}", "jax_full_finetune.tsv")
     params:
         script          = os.path.join(SCRIPTS_DIR, "finetune_alphagenome_jax.py"),
+        mode_args       = _mode_args,
         sequence_length = SF3B1_FT_CFG["sequence_length"],
         junction_position_source = SF3B1_FT_CFG["junction_position_source"],
         max_splice_sites = SF3B1_FT_CFG["max_splice_sites"],
@@ -194,10 +221,11 @@ rule jax_full_finetune:
             --save-every-steps {params.save_every_steps} \
             --max-grad-norm 1.0 \
             --gradient-checkpointing \
+            {params.mode_args} \
             --resume auto \
             --seed 1234 \
             --output-dir {params.output_dir} \
-            --run-name {RUN_NAME}
+            --run-name {wildcards.run_name}
 
         echo "Done!"
         """

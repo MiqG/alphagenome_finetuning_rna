@@ -394,17 +394,41 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--num-devices", type=int, default=4)
     parser.add_argument("--gradient-checkpointing", action="store_true",
                          help="Mirrors alphagenome-pytorch's --gradient-checkpointing: "
-                              "wrap the backbone forward pass in jax.checkpoint so its "
+                              "wrap the backbone forward pass in hk.remat so its "
                               "activations are recomputed on the backward pass instead "
-                              "of retained, trading compute for memory. Currently a "
-                              "no-op for this probing run: --rope-init/--resume both "
-                              "already imply detach_backbone=True (heads-only, frozen "
-                              "trunk), and no backward pass ever reaches the backbone "
-                              "in that case -- same reason alphagenome-pytorch's own "
-                              "--gradient-checkpointing is inert for its frozen-backbone "
-                              "path (torch.no_grad() there means torch.utils.checkpoint "
-                              "has nothing to recompute either). Wired here for parity "
-                              "and for future non-frozen modes (e.g. real backbone LoRA).")
+                              "of retained, trading compute for memory. For "
+                              "--mode linear-probe this still matters even though the "
+                              "backbone is detached (stop_gradient'd) — confirmed "
+                              "empirically that disabling it exhausts the whole GPU's "
+                              "memory just to get through the forward pass at 1Mb "
+                              "sequence length, since JAX/XLA does not elide saving "
+                              "the backbone's forward activations just because a "
+                              "downstream stop_gradient means they end up unused. For "
+                              "--mode lora it is even more directly needed: the "
+                              "backbone is NOT detached there (gradients must reach "
+                              "the LoRA adapters through it).")
+    parser.add_argument("--mode", choices=["linear-probe", "lora"], default="linear-probe",
+                         help="'linear-probe' (default): freeze + detach the backbone, "
+                              "train only the heads (this run's original/only mode). "
+                              "'lora': freeze the backbone but do NOT detach it; instead "
+                              "monkeypatch alphagenome_research's MHABlock so the "
+                              "--lora-targets q/v projections get a trainable low-rank "
+                              "adapter (see alphagenome_ft.lora.install_mha_backbone_lora), "
+                              "and train those adapters + heads. Mirrors "
+                              "alphagenome-pytorch's --mode lora (LoRA adapters + heads).")
+    parser.add_argument("--lora-rank", type=int, default=8,
+                         help="LoRA rank for --mode lora. Matches alphagenome-pytorch's "
+                              "--lora-rank default (8).")
+    parser.add_argument("--lora-alpha", type=float, default=16.0,
+                         help="LoRA alpha scaling for --mode lora; effective adapter "
+                              "scale is alpha/rank. Matches alphagenome-pytorch's "
+                              "--lora-alpha default (16).")
+    parser.add_argument("--lora-targets", default="q_proj,v_proj",
+                         help="Comma-separated backbone attention projections to adapt "
+                              "for --mode lora, using alphagenome-pytorch's naming "
+                              "(q_proj/k_proj/v_proj — translated internally to this "
+                              "JAX model's q_layer/k_layer/v_layer). Matches "
+                              "alphagenome-pytorch's --lora-targets default.")
     parser.add_argument("--max-train-steps", type=int, default=None,
                          help="Optional global cap on optimizer updates, for "
                               "quick smoke-test runs before a full finetune.")
@@ -446,6 +470,7 @@ def main() -> None:
 
     # Imports deferred past argparse so --help works without a full JAX install.
     from alphagenome_ft import create_model_with_heads, load_checkpoint
+    from alphagenome_ft import lora as lora_lib
     from alphagenome_ft.finetune import config as ft_config
     from alphagenome_ft.finetune.data import BigWigDataModule
     from alphagenome_ft.finetune.splice_data import SpliceDataModule
@@ -453,6 +478,22 @@ def main() -> None:
 
     random.seed(args.seed)
     np.random.seed(args.seed)
+
+    lora_enabled = args.mode == "lora"
+    detach_backbone = not lora_enabled
+    install_backbone_patches = None
+    if lora_enabled:
+        lora_cfg = lora_lib.BackboneLoRAConfig.from_pytorch_style_targets(
+            args.lora_targets.split(","), rank=args.lora_rank, alpha=args.lora_alpha,
+        )
+        print(f"Mode: lora — will install backbone LoRA adapters "
+              f"(rank={lora_cfg.rank}, alpha={lora_cfg.alpha}, targets={lora_cfg.targets}) "
+              f"right after the base pretrained checkpoint restores (not before: an "
+              f"active patch makes that restore's own orbax target tree mismatch the "
+              f"saved checkpoint's structure, since it doesn't have LoRA params).")
+
+        def install_backbone_patches() -> None:
+            lora_lib.install_mha_backbone_lora(lora_cfg)
 
     head_ids = {
         "splice_sites_classification": "splice_site",
@@ -517,8 +558,9 @@ def main() -> None:
             resume_dir,
             base_checkpoint_path=args.checkpoint_path,
             init_seq_len=args.sequence_length,
-            detach_backbone=True,
+            detach_backbone=detach_backbone,
             gradient_checkpointing=args.gradient_checkpointing,
+            install_backbone_patches=install_backbone_patches,
         )
     else:
         print("Loading pretrained AlphaGenome JAX model from local checkpoint "
@@ -527,14 +569,22 @@ def main() -> None:
             heads=[spec.head_id for spec in specs],
             checkpoint_path=args.checkpoint_path,
             init_seq_len=args.sequence_length,
-            # heads_only=True in run_train() below only zeroes the backbone's
-            # optimizer updates -- without this, jax.grad still backprops
-            # through the full ~450M-param frozen trunk every step, which is
-            # almost certainly why the first real run OOM'd on a single 80GB
-            # GPU at batch_size=1: peak memory was consistent with training
-            # the whole model, not just the small splice heads.
-            detach_backbone=True,
+            # For --mode linear-probe, detach_backbone=True cuts every
+            # gradient path into the backbone at a single point (the trunk's
+            # output embeddings) -- the root cause of the first real run's
+            # OOM on a single 80GB GPU at batch_size=1 was this NOT being set,
+            # so jax.grad backprop'd through the full ~450M-param frozen
+            # trunk every step (train.py's grad_step now also stop_gradients
+            # each frozen weight individually as a second, complementary
+            # safety net -- see its comment -- but this embeddings-level cut
+            # is what made the very first probing run tractable at all).
+            # For --mode lora, detach_backbone must be False: gradients need
+            # to reach the LoRA adapters through the (otherwise frozen)
+            # backbone, so train.py's per-weight stop_gradient is the only
+            # thing preventing a full-backbone backward pass there.
+            detach_backbone=detach_backbone,
             gradient_checkpointing=args.gradient_checkpointing,
+            install_backbone_patches=install_backbone_patches,
         )
 
         if args.rope_init == "truncated_normal":
@@ -618,6 +668,7 @@ def main() -> None:
         seed=args.seed,
         max_train_steps=args.max_train_steps,
         heads_only=True,
+        lora_enabled=lora_enabled,
         checkpoint_dir=checkpoint_dir,
         organism=args.organism,
         num_devices=args.num_devices,

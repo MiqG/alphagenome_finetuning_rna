@@ -122,6 +122,22 @@ finetuning:
       # which the real predefined rna_seq head uses to rescale predictions/
       # targets on every forward pass.
       track_means_samples: 1000
+      # One entry per parallel run, mirroring workflows/05-full_finetuning's
+      # ALL_RUNS dict/{run_name} wildcard pattern (see Snakefile) so probing
+      # and lora runs are two rows here instead of two near-duplicate rules.
+      # Shared hyperparams above; only mode-specific bits live per-run.
+      runs:
+        probing_jax:
+          run_name: "randinit__annotated__frozen__probing_jax"
+          mode: "linear-probe"
+        lora_jax:
+          run_name: "randinit__annotated__frozen__lora_jax"
+          mode: "lora"
+          # Matches alphagenome-pytorch's --lora-rank/--lora-alpha/--lora-targets
+          # defaults (finetuning.alphagenome.sf3b1mut's "lora" mode run).
+          lora_rank: 8
+          lora_alpha: 16
+          lora_targets: "q_proj,v_proj"
 
 preprocessing:
   overfitting:
