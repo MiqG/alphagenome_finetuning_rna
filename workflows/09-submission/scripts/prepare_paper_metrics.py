@@ -75,6 +75,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--pangolin-full-run")
     p.add_argument("--pangolin-epoch", type=int, default=5)
 
+    p.add_argument("--extra-model", action="append", default=[], metavar="LABEL=PRED_DIR",
+                    help="Additional model to include, given as an explicit predictions "
+                         "directory rather than eval-dir/run-name/epoch (which assumes every "
+                         "run shares that layout -- not true for e.g. the JAX runs in "
+                         "workflows/10-jax_finetuning, which only ever evaluate one checkpoint "
+                         "per run, not an epoch series). Repeatable. Included in every figure "
+                         "(gene_expr, ssu, junctions) alongside the AG/Pangolin runs.")
+
     p.add_argument("--test-bed", default="data/prep/finetuning/alphagenome/FOLD_1/test.bed",
                     help="Evaluation interval BED -- row order is the `interval_idx` used by "
                          "collect_predictions.py, needed to pick the best-centered duplicate "
@@ -85,10 +93,46 @@ def parse_args() -> argparse.Namespace:
 
 
 def _ag_runs(args) -> dict[str, tuple[str, str]]:
+    """The two hardcoded AG (PyTorch) runs -- skipped individually when their
+    --ag-probing-*/--ag-lora-* flags are omitted, so a caller can opt out of
+    the hardcoded AG_MODEL_LABELS pair entirely in favor of fully custom
+    --extra-model labels (e.g. to distinguish "local" vs "xinming" runs,
+    which these fixed labels can't express)."""
+    runs = {}
+    if args.ag_probing_eval_dir and args.ag_probing_run:
+        runs[AG_MODEL_LABELS["probing"]] = (args.ag_probing_eval_dir, args.ag_probing_run)
+    if args.ag_lora_eval_dir and args.ag_lora_run:
+        runs[AG_MODEL_LABELS["lora"]] = (args.ag_lora_eval_dir, args.ag_lora_run)
+    return runs
+
+
+def _extra_pred_dirs(args) -> dict[str, str]:
+    """Parse --extra-model LABEL=PRED_DIR entries into a {label: pred_dir} dict."""
+    dirs = {}
+    for entry in args.extra_model:
+        label, _, pred_dir = entry.partition("=")
+        if not pred_dir:
+            raise ValueError('--extra-model must be "LABEL=PRED_DIR", got: {!r}'.format(entry))
+        dirs[label] = pred_dir
+    return dirs
+
+
+def _pred_dirs_for(run_pairs: dict[str, tuple[str, str]], epoch: int, subset: str) -> dict[str, str]:
+    """Resolve eval-dir/run-name pairs into {label: pred_dir} via the shared
+    eval_dir/run_name/epoch{N}/subset/predictions layout."""
     return {
-        AG_MODEL_LABELS["probing"]: (args.ag_probing_eval_dir, args.ag_probing_run),
-        AG_MODEL_LABELS["lora"]:    (args.ag_lora_eval_dir, args.ag_lora_run),
+        label: os.path.join(eval_dir, run_name, "epoch{}".format(epoch), subset, "predictions")
+        for label, (eval_dir, run_name) in run_pairs.items()
     }
+
+
+def _ag_pred_dirs(args) -> dict[str, str]:
+    """AG (PyTorch) runs plus --extra-model entries (e.g. the JAX runs) -- the model
+    set every figure (gene_expr, ssu, junctions) compares. Pangolin is handled
+    separately (only appears in the ssu figure, via its own epoch)."""
+    dirs = _pred_dirs_for(_ag_runs(args), args.epoch, args.subset)
+    dirs.update(_extra_pred_dirs(args))
+    return dirs
 
 
 def _pangolin_runs(args) -> dict[str, str]:
@@ -354,10 +398,9 @@ def prepare_gene_expr(args) -> pd.DataFrame:
     # present in every model's run (per resolution) so n and the gene set are
     # identical across models -- profile_per_interval/profile_accumulated already
     # match exactly across models and don't need this.
-    ag_runs = _ag_runs(args)
+    pred_dirs = _ag_pred_dirs(args)
     rna_by_model_res = {}
-    for model_label, (eval_dir, run_name) in ag_runs.items():
-        pred_dir = os.path.join(eval_dir, run_name, "epoch{}".format(args.epoch), args.subset, "predictions")
+    for model_label, pred_dir in pred_dirs.items():
         rna_by_model_res[model_label] = {
             "1bp":  pd.read_parquet(os.path.join(pred_dir, "rna_seq_per_gene.parquet")),
             "32bp": pd.read_parquet(os.path.join(pred_dir, "rna_seq_per_gene_32bp.parquet")),
@@ -365,12 +408,12 @@ def prepare_gene_expr(args) -> pd.DataFrame:
 
     common_genes = {
         res_label: set.intersection(*(
-            set(rna_by_model_res[m][res_label]["gene_id"].unique()) for m in ag_runs
+            set(rna_by_model_res[m][res_label]["gene_id"].unique()) for m in pred_dirs
         ))
         for res_label in resolutions
     }
     for res_label in resolutions:
-        for model_label in ag_runs:
+        for model_label in pred_dirs:
             n_genes = rna_by_model_res[model_label][res_label]["gene_id"].nunique()
             n_common = len(common_genes[res_label])
             if n_genes != n_common:
@@ -378,8 +421,7 @@ def prepare_gene_expr(args) -> pd.DataFrame:
                     model_label, res_label, n_genes - n_common, n_genes, n_common))
 
     records = []
-    for model_label, (eval_dir, run_name) in ag_runs.items():
-        pred_dir = os.path.join(eval_dir, run_name, "epoch{}".format(args.epoch), args.subset, "predictions")
+    for model_label, pred_dir in pred_dirs.items():
         for res_label in resolutions:
             for row in profile_corr_rows_per_interval(pred_dir, res_label):
                 row.update({"model": model_label, "setting": "profile_per_interval"})
@@ -402,8 +444,8 @@ def prepare_gene_expr(args) -> pd.DataFrame:
 # Figure 2 — splice site usage
 # ---------------------------------------------------------------------------
 
-def load_ssu_scores(eval_dir: str, run_name: str, epoch: int, subset: str, rename_pos: str | None = None) -> pd.DataFrame:
-    fpath = os.path.join(eval_dir, run_name, "epoch{}".format(epoch), subset, "predictions", "ssu_scores.parquet")
+def load_ssu_scores_from_dir(pred_dir: str, rename_pos: str | None = None) -> pd.DataFrame:
+    fpath = os.path.join(pred_dir, "ssu_scores.parquet")
     df = pd.read_parquet(fpath)
     if rename_pos and rename_pos in df.columns:
         df = df.rename(columns={rename_pos: "exon_pos"})
@@ -470,13 +512,17 @@ def prepare_ssu(args) -> pd.DataFrame:
     windows = load_test_windows(args.test_bed, args.sequence_length)
 
     ag_dfs = {
-        label: load_ssu_scores(eval_dir, run_name, args.epoch, args.subset, rename_pos="exon_pos_1based")
-        for label, (eval_dir, run_name) in _ag_runs(args).items()
+        label: load_ssu_scores_from_dir(pred_dir, rename_pos="exon_pos_1based")
+        for label, pred_dir in _ag_pred_dirs(args).items()
     }
-    pg_dfs = {
-        label: load_ssu_scores(args.pangolin_eval_dir, run_name, args.pangolin_epoch, args.subset)
-        for label, run_name in _pangolin_runs(args).items()
-    }
+    pangolin_pred_dirs = (
+        _pred_dirs_for(
+            {label: (args.pangolin_eval_dir, run_name) for label, run_name in _pangolin_runs(args).items()},
+            args.pangolin_epoch, args.subset,
+        )
+        if args.pangolin_eval_dir else {}
+    )
+    pg_dfs = {label: load_ssu_scores_from_dir(pred_dir) for label, pred_dir in pangolin_pred_dirs.items()}
 
     ag_dedups = {label: select_max_context_ssu_rows(df, windows) for label, df in ag_dfs.items()}
     pg_dedups = {label: select_max_context_ssu_rows(df, windows) for label, df in pg_dfs.items()}
@@ -539,8 +585,7 @@ def prepare_junctions(args) -> pd.DataFrame:
     windows = load_test_windows(args.test_bed, args.sequence_length)
 
     dedups = {}
-    for model_label, (eval_dir, run_name) in _ag_runs(args).items():
-        pred_dir = os.path.join(eval_dir, run_name, "epoch{}".format(args.epoch), args.subset, "predictions")
+    for model_label, pred_dir in _ag_pred_dirs(args).items():
         junc_df = pd.read_parquet(os.path.join(pred_dir, "junction_scores.parquet"))
         dedups[model_label] = select_max_context_junction_rows(junc_df, windows)
 
