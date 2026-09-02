@@ -1,0 +1,288 @@
+"""
+Workflow 11 — Evaluation of xinming's PyTorch finetuning checkpoints on
+FOLD_1 test set.
+
+Mirrors workflows/06-evaluation/Snakefile (same collect_predictions.py /
+compute_eval_metrics.py, same conda env, same GPU resources) but sources
+checkpoints from xinming's results package instead of this repo's own local
+finetuning output — xinming continued the same two runs (probing, LoRA) on
+their own cluster:
+  results/xinming/alphagenome_finetuning_downstream_2026-08-31/checkpoints/pytorch/
+    probing_epoch10/checkpoint_epoch10.pth        -- complete, 10 epochs
+    lora_epoch7_PARTIAL/checkpoint_epoch7.pth      -- partial, 7 of 10 epochs
+
+collect_predictions.py's load_finetuned_model() requires a config.json next
+to the checkpoint file (mode/lora_rank/lora_alpha/lora_targets); xinming's
+checkpoint dirs don't have one, but the same config exists separately under
+metadata/runs/{pytorch_probing,pytorch_lora_PARTIAL}/config.json -- rule
+stage_checkpoint_config symlinks it into place.
+
+Subsets:
+  test          -- held-out test intervals (6,359 intervals)
+  train_sample  -- seeded random sample of train intervals, same size as test
+
+Outputs:
+  results/evaluation/alphagenome_pytorch_xinming/full/{run_name}/epoch{epoch}/{subset}/predictions/*.parquet
+  results/evaluation/alphagenome_pytorch_xinming/full/{run_name}/epoch{epoch}/{subset}/metrics.parquet
+
+Run with:
+    snakemake -s workflows/11-xinming_pytorch_evaluation/Snakefile --use-conda [-n]
+
+As with other GPU workflows in this repo, submit the actual (non-dry-run)
+run via SLURM rather than on the login node:
+    sbatch src/scripts/submit_snakemake_slurm.sh \\
+        'snakemake --cluster "sbatch --cpus-per-task={threads} --mem={resources.memory}G --time={resources.runtime} --partition={resources.partition} --gres={resources.gres} --parsable" --cluster-status src/scripts/status-sacct.sh --jobs 4 --use-conda -s workflows/11-xinming_pytorch_evaluation/Snakefile --latency-wait 60 --rerun-incomplete --keep-going --rerun-triggers mtime'
+"""
+
+import os
+
+configfile: "config/config.yaml"
+
+DATA_DIR       = config["rnaseq"]["sf3b1mut"]["path"]
+XINMING_DIR    = "results/xinming/alphagenome_finetuning_downstream_2026-08-31"
+XINMING_CKPT_DIR = os.path.join(XINMING_DIR, "checkpoints", "pytorch")
+OUTPUT_DIR     = "results/evaluation/alphagenome_pytorch_xinming/full"
+FOLDS_DIR      = config["finetuning"]["alphagenome"]["folds_dir"]
+FOLD           = config["preprocessing"]["overfitting"]["fold"]
+SAMPLES        = config["preprocessing"]["overfitting"]["samples"]
+BIGWIG_STRANDS = ["forward", "reverse"]
+
+COLLECT_SCRIPT = "src/scripts/collect_predictions.py"
+METRICS_SCRIPT = "src/scripts/compute_eval_metrics.py"
+
+EVAL_SUBSETS = ["test", "train_sample"]
+
+SUBSET_BED = {
+    "test":         os.path.join(FOLDS_DIR, FOLD, "test.bed"),
+    "train_sample": os.path.join(FOLDS_DIR, FOLD, "train_sample.bed"),
+}
+
+# run_name -> where xinming's checkpoint for it lives + which epoch it is +
+# which metadata/runs/ subdir holds its config.json (config.json isn't
+# colocated with the checkpoint in xinming's package -- see module docstring).
+XINMING_PT_RUNS = {
+    "randinit__newloss__annotated__frozen__multigpu_ddp": {
+        "checkpoint_subdir": "probing_epoch10",
+        "epoch": 10,
+        "config_source": "pytorch_probing",
+    },
+    "randinit__newloss__annotated__lora__largegpu__nowarmup": {
+        "checkpoint_subdir": "lora_epoch7_PARTIAL",
+        "epoch": 7,
+        "config_source": "pytorch_lora_PARTIAL",
+    },
+}
+
+# Flat (run_name, epoch, subset) triples used by expand() -- mirrors
+# workflows/06-evaluation/Snakefile's _RUN_NAMES/_EPOCHS/_SUBSETS pattern,
+# except each run_name here has exactly one fixed epoch (xinming shipped one
+# checkpoint per run, not an epoch series).
+_RUN_NAMES = [r for r in XINMING_PT_RUNS for s in EVAL_SUBSETS]
+_EPOCHS    = [cfg["epoch"] for r, cfg in XINMING_PT_RUNS.items() for s in EVAL_SUBSETS]
+_SUBSETS   = [s for r in XINMING_PT_RUNS for s in EVAL_SUBSETS]
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _bigwigs(wildcards):
+    return [
+        os.path.join(DATA_DIR, "STAR", sample,
+                     "paper_pass.Aligned.sortedByCoord.out.filtered.{}.bw".format(strand))
+        for sample in SAMPLES
+        for strand in BIGWIG_STRANDS
+    ]
+
+
+def _ssu_parquets(wildcards):
+    return [
+        os.path.join(DATA_DIR, "STAR", sample, "paper_pass.ssu.parquet")
+        for sample in SAMPLES
+    ]
+
+
+def _star_junctions(wildcards):
+    return [
+        os.path.join(DATA_DIR, "STAR", sample, "paper_pass.SJ.out.tab")
+        for sample in SAMPLES
+    ]
+
+
+def _interval_bed(wildcards):
+    return SUBSET_BED[wildcards.subset]
+
+
+def _checkpoint_dir(wildcards):
+    return os.path.join(XINMING_CKPT_DIR, XINMING_PT_RUNS[wildcards.run_name]["checkpoint_subdir"])
+
+
+def _checkpoint_path(wildcards):
+    cfg = XINMING_PT_RUNS[wildcards.run_name]
+    return os.path.join(XINMING_CKPT_DIR, cfg["checkpoint_subdir"],
+                         "checkpoint_epoch{}.pth".format(cfg["epoch"]))
+
+
+def _staged_config_path(wildcards):
+    return os.path.join(_checkpoint_dir(wildcards), "config.json")
+
+
+def _staged_config_path_for(run_name):
+    cfg = XINMING_PT_RUNS[run_name]
+    return os.path.join(XINMING_CKPT_DIR, cfg["checkpoint_subdir"], "config.json")
+
+
+def _config_source_path_for(run_name):
+    cfg = XINMING_PT_RUNS[run_name]
+    return os.path.join(XINMING_DIR, "metadata", "runs", cfg["config_source"], "config.json")
+
+
+# ---------------------------------------------------------------------------
+# Rules
+# ---------------------------------------------------------------------------
+
+# Trivial symlink operations -- run directly on the submitting node instead
+# of going through the --cluster sbatch template (which references
+# {resources.memory}/{resources.partition}/{resources.gres}; these rules
+# declare no resources: block since they need none, so submitting them to
+# the cluster crashes the template formatting).
+include: "rules/paper.smk"
+
+localrules: stage_checkpoint_config_probing, stage_checkpoint_config_lora
+
+
+rule all:
+    input:
+        expand(
+            os.path.join(OUTPUT_DIR, "{run_name}", "epoch{epoch}", "{subset}", "metrics.parquet"),
+            zip,
+            run_name=_RUN_NAMES,
+            epoch=_EPOCHS,
+            subset=_SUBSETS,
+        ),
+        PAPER_JAX_TARGETS,
+
+
+rule stage_checkpoint_config_probing:
+    """Symlink the probing run's config.json (filed separately under
+    metadata/runs/ in xinming's package) next to its checkpoint file, where
+    collect_predictions.py's load_finetuned_model() expects to find it.
+    (Snakemake requires output: to be a static path, not a function -- with
+    only two runs, two concrete rules beat a wildcard-generic one here.)"""
+    input:
+        config = _config_source_path_for("randinit__newloss__annotated__frozen__multigpu_ddp"),
+    output:
+        config = _staged_config_path_for("randinit__newloss__annotated__frozen__multigpu_ddp"),
+    run:
+        os.symlink(os.path.abspath(input.config), output.config)
+
+
+rule stage_checkpoint_config_lora:
+    """Same as stage_checkpoint_config_probing, for the LoRA run."""
+    input:
+        config = _config_source_path_for("randinit__newloss__annotated__lora__largegpu__nowarmup"),
+    output:
+        config = _staged_config_path_for("randinit__newloss__annotated__lora__largegpu__nowarmup"),
+    run:
+        os.symlink(os.path.abspath(input.config), output.config)
+
+
+rule collect_predictions:
+    """Single-GPU inference on interval BED -- writes prediction parquets."""
+    wildcard_constraints:
+        run_name = "|".join(XINMING_PT_RUNS.keys()),
+        epoch    = r"\d+",
+        subset   = r"[a-z_]+",
+    input:
+        checkpoint       = _checkpoint_path,
+        staged_config    = _staged_config_path,
+        pretrained       = config["alphagenome_pytorch"]["paths"]["weights"],
+        interval_bed     = _interval_bed,
+        genome           = config["gencode"]["paths"]["fasta"],
+        gtf_parquet      = config["gencode"]["paths"]["gtf_parquet"],
+        bigwigs          = _bigwigs,
+        ssu_parquets     = _ssu_parquets,
+        star_junctions   = _star_junctions,
+    output:
+        rna_seq          = os.path.join(OUTPUT_DIR, "{run_name}", "epoch{epoch}", "{subset}", "predictions", "rna_seq_per_gene.parquet"),
+        splice_site      = os.path.join(OUTPUT_DIR, "{run_name}", "epoch{epoch}", "{subset}", "predictions", "splice_site_scores.parquet"),
+        ssu              = os.path.join(OUTPUT_DIR, "{run_name}", "epoch{epoch}", "{subset}", "predictions", "ssu_scores.parquet"),
+        junctions        = os.path.join(OUTPUT_DIR, "{run_name}", "epoch{epoch}", "{subset}", "predictions", "junction_scores.parquet"),
+        psi              = os.path.join(OUTPUT_DIR, "{run_name}", "epoch{epoch}", "{subset}", "predictions", "psi_scores.parquet"),
+        junction_totals  = os.path.join(OUTPUT_DIR, "{run_name}", "epoch{epoch}", "{subset}", "predictions", "junction_totals.parquet"),
+    params:
+        output_dir      = lambda wildcards: os.path.join(OUTPUT_DIR, wildcards.run_name, "epoch{}".format(wildcards.epoch), wildcards.subset, "predictions"),
+        samples         = " ".join(SAMPLES),
+        sequence_length = config["finetuning"]["alphagenome"]["sf3b1mut"]["sequence_length"],
+    benchmark:
+        os.path.join(OUTPUT_DIR, "benchmarks", "{run_name}", "epoch{epoch}", "{subset}", "collect_predictions.tsv")
+    threads: 20
+    resources:
+        runtime   = int(12 * 60),
+        partition = "gpu_diasfrazer",
+        gres      = "gpu:h100:1",
+        memory    = 128,
+    conda:
+        "alphagenome_pytorch"
+    shell:
+        """
+        set -eo pipefail
+
+        python {COLLECT_SCRIPT} \
+            --pretrained-weights {input.pretrained} \
+            --checkpoint {input.checkpoint} \
+            --test-bed {input.interval_bed} \
+            --genome {input.genome} \
+            --gtf-parquet {input.gtf_parquet} \
+            --bigwigs {input.bigwigs} \
+            --ssu-parquets {input.ssu_parquets} \
+            --star-junctions {input.star_junctions} \
+            --samples {params.samples} \
+            --sequence-length {params.sequence_length} \
+            --dtype bfloat16 \
+            --output-dir {params.output_dir}
+
+        echo "Done collecting predictions for {wildcards.run_name} epoch {wildcards.epoch} subset {wildcards.subset}"
+        """
+
+
+rule compute_metrics:
+    """Compute all evaluation metrics from prediction parquets."""
+    wildcard_constraints:
+        run_name = "|".join(XINMING_PT_RUNS.keys()),
+        epoch    = r"\d+",
+        subset   = r"[a-z_]+",
+    input:
+        rna_seq         = os.path.join(OUTPUT_DIR, "{run_name}", "epoch{epoch}", "{subset}", "predictions", "rna_seq_per_gene.parquet"),
+        splice_site     = os.path.join(OUTPUT_DIR, "{run_name}", "epoch{epoch}", "{subset}", "predictions", "splice_site_scores.parquet"),
+        ssu             = os.path.join(OUTPUT_DIR, "{run_name}", "epoch{epoch}", "{subset}", "predictions", "ssu_scores.parquet"),
+        junctions       = os.path.join(OUTPUT_DIR, "{run_name}", "epoch{epoch}", "{subset}", "predictions", "junction_scores.parquet"),
+        psi             = os.path.join(OUTPUT_DIR, "{run_name}", "epoch{epoch}", "{subset}", "predictions", "psi_scores.parquet"),
+        junction_totals = os.path.join(OUTPUT_DIR, "{run_name}", "epoch{epoch}", "{subset}", "predictions", "junction_totals.parquet"),
+    output:
+        metrics_json    = os.path.join(OUTPUT_DIR, "{run_name}", "epoch{epoch}", "{subset}", "metrics.json"),
+        metrics_parquet = os.path.join(OUTPUT_DIR, "{run_name}", "epoch{epoch}", "{subset}", "metrics.parquet"),
+    params:
+        predictions_dir = lambda wildcards: os.path.join(OUTPUT_DIR, wildcards.run_name, "epoch{}".format(wildcards.epoch), wildcards.subset, "predictions"),
+        output_dir      = lambda wildcards: os.path.join(OUTPUT_DIR, wildcards.run_name, "epoch{}".format(wildcards.epoch), wildcards.subset),
+    benchmark:
+        os.path.join(OUTPUT_DIR, "benchmarks", "{run_name}", "epoch{epoch}", "{subset}", "compute_metrics.tsv")
+    threads: 32
+    resources:
+        runtime   = int(0.5 * 60),
+        gres      = "none",
+        partition = "genoa64",
+        memory    = 64,
+    conda:
+        "alphagenome_pytorch"
+    shell:
+        """
+        set -eo pipefail
+
+        python {METRICS_SCRIPT} \
+            --predictions-dir {params.predictions_dir} \
+            --output-dir {params.output_dir} \
+            --min-junction-counts 5
+
+        echo "Done computing metrics for {wildcards.run_name} epoch {wildcards.epoch} subset {wildcards.subset}"
+        """
