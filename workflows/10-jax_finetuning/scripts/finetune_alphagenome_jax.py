@@ -32,23 +32,37 @@ has no PyTorch-style original/normalized/sparse switch — it's a single fixed
 formula that already matches the PyTorch port's "normalized" variant, so
 there is intentionally no --junction-loss flag here.
 
-RoPE zero-init dead-gradient bug (--rope-init): SpliceSitesJunctionHead's RoPE
-scale/offset parameter ("embeddings") is zero-initialized in the real JAX head
-(hk.get_parameter(..., init=jnp.zeros)). Predicted junction counts are a
+RoPE zero-init dead-gradient bug (--rope-init) — HISTORICAL, FIXED UPSTREAM:
+SpliceSitesJunctionHead's RoPE scale/offset parameter ("embeddings") used to
+be zero-initialized in the real JAX head (hk.get_parameter(..., init=
+jnp.zeros)) in alphagenome_research 0.1.0. Predicted junction counts are a
 bilinear product of donor and acceptor logits, both of which are exactly zero
 whenever this parameter is exactly zero — so the gradient of that product
-w.r.t. either logit is proportional to the *other* logit, which is also zero.
-That is a stable zero-gradient fixed point: nothing moves, ever, when training
-this head from scratch. Confirmed empirically (see
-plans/10-jax-alphagenome_ft-reproduction.md) — every splice_junctions
-parameter, including the non-zero-initialized multi_organism_linear/w, showed
-exactly zero change after 5 real training steps with a nonzero loss, while the
-splice_site head's params moved normally in the same run. This is the exact
-same bug alphagenome-pytorch's --rope-init flag documents and works around
-(zeros is explicitly "the original buggy JAX init, for ablation only";
-truncated_normal is its default). alphagenome_ft calls the real JAX head
-directly with no equivalent override, so --rope-init here manually re-inits
-the four RoPE embeddings parameters after model construction, before training.
+w.r.t. either logit is proportional to the *other* logit, which is also zero:
+a stable zero-gradient fixed point, nothing moves when training this head
+from scratch. Confirmed at the time (see
+plans/10-jax-alphagenome_ft-reproduction.md) via 5 real training steps
+showing exactly zero change in every splice_junctions parameter (including
+the non-zero-initialized multi_organism_linear/w) while splice_site's params
+moved normally in the same run. This was the exact same bug
+alphagenome-pytorch's --rope-init flag documents and works around (zeros is
+"the original buggy JAX init, for ablation only"; truncated_normal is its
+default). --rope-init/_reinit_junction_rope_embeddings here was written as
+alphagenome_ft's equivalent workaround, manually re-initializing the four
+RoPE embeddings parameters after model construction, before training.
+
+**This bug is gone with the currently-installed alphagenome_research (0.3.0
+— pulled in by this project's own alphagenome_research 0.1.0 -> 0.3.0
+upgrade, see plans/10-jax-alphagenome_ft-reproduction.md's environment
+section).** Confirmed empirically: a fresh create_model_with_heads(mode=
+"linear-probe") already gives this parameter a TruncatedNormal(0.1)-ish,
+nonzero init with normal nonzero gradients from the very first step — no
+reinit needed. --rope-init therefore now defaults to "none" (skip the
+workaround, trust the fresh init) rather than always reinitializing;
+"truncated_normal"/"zeros" remain available for explicit ablation only (at
+--rope-init-std 0.1, "truncated_normal" is statistically indistinguishable
+from "none" anyway — it just redraws from the same distribution the fresh
+init already has).
 """
 
 from __future__ import annotations
@@ -224,8 +238,8 @@ _JUNCTION_ROPE_SUBMODULES = (
 
 
 def _reinit_junction_rope_embeddings(model, head_id: str, std: float, seed: int) -> None:
-    """Replace a SpliceSitesJunctionHead's zero-initialized RoPE "embeddings"
-    parameter with small truncated-normal noise.
+    """Overwrite a SpliceSitesJunctionHead's RoPE "embeddings" parameter with
+    a fresh truncated-normal(std) sample (std=0.0 gives exact zeros).
 
     model._params is a plain flat {module_path: {param_name: array}} dict
     (confirmed by direct inspection, not a Haiku FlatMapping requiring
@@ -233,10 +247,13 @@ def _reinit_junction_rope_embeddings(model, head_id: str, std: float, seed: int)
     silently restructured the tree in a way parameter_utils.get_head_parameter_paths
     no longer recognized, breaking --heads-only optimizer masking entirely).
 
-    See the module docstring for why this reinit is needed: at exact zero,
-    predicted junction counts (a bilinear donor*acceptor product) have an
-    exactly-zero gradient w.r.t. this parameter, so training from scratch
-    never moves it.
+    Only called for explicit --rope-init ablation (truncated_normal or
+    zeros) — the default --rope-init none never calls this, since a fresh
+    model construction with the currently-installed alphagenome_research
+    (0.3.0+) already gives this parameter a real TruncatedNormal(0.1)-ish
+    init with normal nonzero gradients (see module docstring: the zero-init
+    dead-gradient bug this function originally existed to work around was
+    fixed upstream and no longer reproduces without this explicit override).
     """
     import jax
 
@@ -359,16 +376,35 @@ def _parse_args() -> argparse.Namespace:
                               "(annotation-only sites, zero usage).")
     parser.add_argument("--junction-position-source", choices=["annotated", "predicted"],
                          default="annotated")
-    parser.add_argument("--rope-init", choices=["truncated_normal", "zeros"],
-                         default="truncated_normal",
+    parser.add_argument("--rope-init", choices=["none", "truncated_normal", "zeros"],
+                         default="none",
                          help="How to initialize SpliceSitesJunctionHead's RoPE "
-                              "scale/offset ('embeddings') parameter. zeros is "
-                              "the real JAX head's own init and has a dead-"
-                              "gradient bug when training from scratch (see "
-                              "module docstring) — use truncated_normal unless "
-                              "specifically running the zeros ablation.")
-    parser.add_argument("--rope-init-std", type=float, default=0.02,
-                         help="Stddev for --rope-init truncated_normal.")
+                              "scale/offset ('embeddings') parameter. 'none' "
+                              "(default) skips any manual reinit and trusts "
+                              "the fresh Haiku init a real model construction "
+                              "already gives this parameter -- confirmed "
+                              "empirically (job 28176807, alphagenome_research "
+                              "0.3.0) to already be TruncatedNormal(0.1)-"
+                              "distributed with normal nonzero gradients from "
+                              "the start; the zero-init dead-gradient bug this "
+                              "flag originally worked around was fixed "
+                              "upstream (alphagenome_research 0.1.0->0.3.0, "
+                              "see plans/10-jax-alphagenome_ft-reproduction.md) "
+                              "and no longer exists with the currently "
+                              "installed package. 'truncated_normal' manually "
+                              "reinits to a fresh TruncatedNormal(std) sample "
+                              "-- statistically indistinguishable from 'none' "
+                              "at --rope-init-std 0.1, kept only for explicit "
+                              "ablation. 'zeros' reproduces the old buggy init "
+                              "for ablation only -- do not use otherwise.")
+    parser.add_argument("--rope-init-std", type=float, default=0.1,
+                         help="Stddev for --rope-init truncated_normal (ignored "
+                              "when --rope-init is 'none', the default). 0.1 "
+                              "matches alphagenome_research's own real "
+                              "TruncatedNormal(0.1) init for this parameter "
+                              "(heads.py) and alphagenome-pytorch's hardcoded "
+                              "std=0.1 ('matches the JAX reference init and "
+                              "the pretrained weight distribution').")
     parser.add_argument("--sequence-length", type=int, default=1048576)
     parser.add_argument("--max-splice-sites", type=int, default=256)
     parser.add_argument("--lr", type=float, default=1e-4)
@@ -622,10 +658,19 @@ def main() -> None:
 
         if args.rope_init == "truncated_normal":
             print(f"Re-initializing junction head RoPE embeddings "
-                  f"(std={args.rope_init_std}) to avoid the zero-init dead-gradient "
-                  f"bug — see module docstring.")
+                  f"(std={args.rope_init_std}) — explicit ablation only; the "
+                  f"fresh model's own init (--rope-init none, the default) "
+                  f"is already TruncatedNormal-ish and correct, see module "
+                  f"docstring.")
             _reinit_junction_rope_embeddings(
                 model, head_ids["splice_sites_junction"], std=args.rope_init_std, seed=args.seed,
+            )
+        elif args.rope_init == "zeros":
+            print("Re-initializing junction head RoPE embeddings to exact "
+                  "zeros — reproduces the since-fixed upstream dead-gradient "
+                  "bug on purpose, ablation only, see module docstring.")
+            _reinit_junction_rope_embeddings(
+                model, head_ids["splice_sites_junction"], std=0.0, seed=args.seed,
             )
 
         print("Initializing splice_site head from the pretrained model's own "
