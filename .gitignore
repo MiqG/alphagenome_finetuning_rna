@@ -24,6 +24,7 @@ src/custom-pangolin
 Rplots.pdf
 *.egg-info*
 slurm-*
+.job_logs/
 *wandb*
 ._*
 *.pdf
