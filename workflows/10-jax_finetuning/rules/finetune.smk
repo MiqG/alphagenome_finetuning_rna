@@ -174,6 +174,7 @@ rule jax_full_finetune:
         num_devices     = SF3B1_FT_CFG["num_devices"],
         save_every_steps = SF3B1_FT_CFG["save_every_steps"],
         track_means_samples = SF3B1_FT_CFG["track_means_samples"],
+        dtype           = SF3B1_FT_CFG["dtype"],
         output_dir      = OUTPUT_DIR,
     threads: SF3B1_FT_CFG["num_devices"] * 8
     resources:
@@ -222,6 +223,7 @@ rule jax_full_finetune:
             --gradient-accumulation-steps {params.gradient_accumulation_steps} \
             --num-devices {params.num_devices} \
             --save-every-steps {params.save_every_steps} \
+            --dtype {params.dtype} \
             --max-grad-norm 1.0 \
             --gradient-checkpointing \
             {params.mode_args} \

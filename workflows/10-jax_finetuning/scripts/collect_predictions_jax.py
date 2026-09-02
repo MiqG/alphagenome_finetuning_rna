@@ -43,6 +43,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import pickle
 import sys
@@ -99,6 +100,16 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--lora-rank", type=int, default=8)
     p.add_argument("--lora-alpha", type=float, default=16.0)
     p.add_argument("--lora-targets", default="q_proj,v_proj")
+    p.add_argument("--dtype", choices=["bfloat16", "float32"], default=None,
+                    help="Compute dtype for heads (must match what the checkpoint "
+                         "was actually trained under). Default: auto-detected from "
+                         "config.json alongside --checkpoint-dir's parent (written "
+                         "by finetune_alphagenome_jax.py); if that file doesn't "
+                         "exist (e.g. a checkpoint trained before this dtype-"
+                         "selection feature existed, when heads always silently "
+                         "ran float32 regardless of any setting), falls back to "
+                         "float32 to match that historical behavior, not bfloat16. "
+                         "Pass this flag explicitly only to deliberately override.")
     p.add_argument("--test-bed", required=True)
     p.add_argument("--train-bed", required=True,
                    help="Training-fold BED used to compute each rna_seq track's "
@@ -155,6 +166,7 @@ def load_finetuned_model_jax(
     lora_rank: int = 8,
     lora_alpha: float = 16.0,
     lora_targets: str = "q_proj,v_proj",
+    dtype: str = "bfloat16",
 ):
     """Reconstruct the finetuned JAX model from an orbax checkpoint directory.
 
@@ -266,6 +278,7 @@ def load_finetuned_model_jax(
         detach_backbone=detach_backbone,
         gradient_checkpointing=False,
         install_backbone_patches=install_backbone_patches,
+        dtype=dtype,
     )
 
     import jax
@@ -288,6 +301,18 @@ def load_finetuned_model_jax(
         if not isinstance(model._state, dict):
             model._state = {}
         model._state.update(loaded_state)
+
+    if dtype == "bfloat16":
+        # loaded_params (real values restored from the orbax checkpoint file)
+        # unconditionally overwrite the fresh create_model_with_heads(...,
+        # dtype="bfloat16") call's already-correctly-cast head params above
+        # -- if the checkpoint was saved under a different dtype (e.g. any
+        # checkpoint trained before this dtype-selection feature existed,
+        # when heads always silently ran float32), that overwrite silently
+        # reverts heads back to float32 regardless of the dtype requested
+        # here. Re-cast after the update so the requested dtype always wins.
+        from alphagenome_ft.custom_model import _cast_head_params_to_bfloat16
+        model._params = _cast_head_params_to_bfloat16(model._params)
 
     device = model._device_context._device
     model._params = jax.device_put(model._params, device)
@@ -388,6 +413,25 @@ def main() -> None:
     with open(args.checkpoint_path_file) as f:
         base_checkpoint_path = f.read().strip()
 
+    if args.dtype is None:
+        # --checkpoint-dir is the orbax "last"/"best" leaf; config.json (if
+        # this checkpoint was trained after the dtype-selection feature
+        # landed) lives one level up, alongside it -- see
+        # finetune_alphagenome_jax.py's config.json write.
+        config_path = os.path.join(os.path.dirname(os.path.normpath(args.checkpoint_dir)), "config.json")
+        if os.path.exists(config_path):
+            with open(config_path) as f:
+                trained_dtype = json.load(f).get("dtype")
+            args.dtype = trained_dtype or "float32"
+            print("Auto-detected dtype={} from {}".format(args.dtype, config_path))
+        else:
+            args.dtype = "float32"
+            print("No config.json found at {} -- this checkpoint predates the "
+                  "dtype-selection feature, when heads always silently ran "
+                  "float32 regardless of any setting. Defaulting eval dtype to "
+                  "float32 to match that historical training behavior (not "
+                  "bfloat16). Pass --dtype explicitly to override.".format(config_path))
+
     # rna_seq track_means must be recomputed exactly as at training time (see
     # load_finetuned_model_jax's rna_seq heads_cfg comment) -- same bigwigs,
     # same bed, same sequence_length, same subsetting, or every rna_seq
@@ -415,6 +459,7 @@ def main() -> None:
         lora_rank=args.lora_rank,
         lora_alpha=args.lora_alpha,
         lora_targets=args.lora_targets,
+        dtype=args.dtype,
     )
 
     from alphagenome.models import dna_model as ag_dna_model

@@ -446,6 +446,13 @@ def _parse_args() -> argparse.Namespace:
                               "optimizer update. Matches alphagenome-pytorch's "
                               "--max-grad-norm (also hardcoded to 1.0 there). "
                               "Pass 0 or a negative value to disable clipping.")
+    parser.add_argument("--dtype", choices=["bfloat16", "float32"], default="bfloat16",
+                         help="Compute dtype for the trunk AND heads (params stay "
+                              "fp32). Matches alphagenome-pytorch's --dtype "
+                              "(same default, bfloat16). Previously this repo's "
+                              "JAX driver had no such flag -- mixed precision was "
+                              "hardcoded for the trunk only, with heads always "
+                              "silently running float32 regardless.")
     parser.add_argument("--usage-num-segments", type=int, default=8,
                          help="Split the sequence into this many equal chunks for the "
                               "splice_site_usage BCE loss, summing per-chunk masked means "
@@ -560,6 +567,20 @@ def main() -> None:
     resume_dir = checkpoint_dir / "last"
     do_resume = args.resume == "auto" and (resume_dir / "train_state.json").exists()
 
+    if not do_resume:
+        # config.json alongside the checkpoint dir, matching
+        # alphagenome-pytorch's convention (config.json colocated with the
+        # checkpoint) -- collect_predictions_jax.py reads this to use the
+        # SAME dtype the checkpoint was actually trained under by default,
+        # rather than requiring the caller to know/pass the right --dtype
+        # and risk silently mismatching it. Written once at the start of a
+        # fresh run (not on resume, since it's already correct from the
+        # first attempt and the true value can't change mid-run).
+        import json
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        with open(checkpoint_dir / "config.json", "w") as f:
+            json.dump({"dtype": args.dtype, "mode": args.mode}, f, indent=2)
+
     if do_resume:
         print(f"Found existing checkpoint at {resume_dir} — resuming from it "
               f"(skipping fresh pretrained-weight load and --rope-init reinit, "
@@ -571,6 +592,7 @@ def main() -> None:
             detach_backbone=detach_backbone,
             gradient_checkpointing=args.gradient_checkpointing,
             install_backbone_patches=install_backbone_patches,
+            dtype=args.dtype,
         )
     else:
         print("Loading pretrained AlphaGenome JAX model from local checkpoint "
@@ -595,6 +617,7 @@ def main() -> None:
             detach_backbone=detach_backbone,
             gradient_checkpointing=args.gradient_checkpointing,
             install_backbone_patches=install_backbone_patches,
+            dtype=args.dtype,
         )
 
         if args.rope_init == "truncated_normal":

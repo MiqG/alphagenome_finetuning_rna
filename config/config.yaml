@@ -122,6 +122,9 @@ finetuning:
       # which the real predefined rna_seq head uses to rescale predictions/
       # targets on every forward pass.
       track_means_samples: 1000
+      # Matches finetuning.alphagenome.sf3b1mut's --dtype (PyTorch, also
+      # defaults to bfloat16) — trunk+heads compute in bfloat16, params fp32.
+      dtype: "bfloat16"
       # One entry per parallel run, mirroring workflows/05-full_finetuning's
       # ALL_RUNS dict/{run_name} wildcard pattern (see Snakefile) so probing
       # and lora runs are two rows here instead of two near-duplicate rules.
