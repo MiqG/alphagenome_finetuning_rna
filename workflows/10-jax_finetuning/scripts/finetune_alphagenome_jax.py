@@ -446,6 +446,16 @@ def _parse_args() -> argparse.Namespace:
                               "optimizer update. Matches alphagenome-pytorch's "
                               "--max-grad-norm (also hardcoded to 1.0 there). "
                               "Pass 0 or a negative value to disable clipping.")
+    parser.add_argument("--usage-num-segments", type=int, default=8,
+                         help="Split the sequence into this many equal chunks for the "
+                              "splice_site_usage BCE loss, summing per-chunk masked means "
+                              "instead of one global mean (upweights sparse splice-site "
+                              "regions) -- see CustomAlphaGenomeModel.set_usage_num_segments "
+                              "in alphagenome_ft/custom_model.py. Matches alphagenome-pytorch's "
+                              "--num-segments default (8), which is what's actually active "
+                              "for the reference LoRA run (--min-alpha-juncs 0 there disables "
+                              "its alternative alpha-confidence-masking branch). Pass 1 to "
+                              "disable (single global mean, the old/JAX-only behavior).")
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--organism", default="HOMO_SAPIENS")
     parser.add_argument("--output-dir", required=True, type=Path)
@@ -600,6 +610,11 @@ def main() -> None:
               "alphagenome-pytorch's --pretrained-head-samples splice_site:0; "
               "see _init_splice_site_from_pretrained docstring).")
         _init_splice_site_from_pretrained(model, head_ids["splice_sites_classification"])
+
+    if args.usage_num_segments > 1:
+        model.set_usage_num_segments(
+            head_ids["splice_sites_usage"], args.usage_num_segments,
+        )
 
     intervals = {
         "train": _load_interval_list(args.train_bed, window_size=args.sequence_length),
