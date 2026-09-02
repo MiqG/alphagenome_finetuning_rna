@@ -46,6 +46,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import pickle
 import random
 
 import numpy as np
@@ -598,6 +599,47 @@ def accumulator_to_df(
 
 
 # ---------------------------------------------------------------------------
+# Resume support
+#
+# State lives under <output_dir>/.progress/ -- not a declared Snakemake
+# output (only the final named parquets in output_dir are), so
+# --rerun-incomplete can never delete it out from under a resumed run.
+# ---------------------------------------------------------------------------
+
+def _progress_dir(output_dir: str) -> str:
+    d = os.path.join(output_dir, ".progress")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _load_progress(output_dir: str):
+    """Return (done_interval_indices: set[int], state: dict | None) from any
+    prior partial run, or (set(), None) if no checkpoint exists."""
+    state_path = os.path.join(_progress_dir(output_dir), "state.pkl")
+    if not os.path.exists(state_path):
+        return set(), None
+    with open(state_path, "rb") as f:
+        state = pickle.load(f)
+    return set(state["done_intervals"]), state
+
+
+def _save_progress(output_dir: str, done_intervals: set, row_lists: dict, accumulators: dict) -> None:
+    state_path = os.path.join(_progress_dir(output_dir), "state.pkl")
+    tmp_path = state_path + ".tmp"
+    state = {
+        "done_intervals": done_intervals,
+        "row_lists": row_lists,
+        "accumulators": accumulators,
+    }
+    with open(tmp_path, "wb") as f:
+        pickle.dump(state, f)
+    os.replace(tmp_path, state_path)  # atomic
+
+
+_SAVE_EVERY = 200
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -622,12 +664,7 @@ def main() -> None:
     print("  rna_seq tracks={}, ssu_tracks={}, junc_samples={}".format(n_rna_tracks, n_ssu_tracks, n_junc_samples))
 
     # Profile correlation accumulators (online Pearson r across all test intervals)
-    acc_exon_1bp    = ProfileCorrAccumulator(n_rna_tracks)
-    acc_full_1bp    = ProfileCorrAccumulator(n_rna_tracks)
-    acc_exon_32bp   = ProfileCorrAccumulator(n_rna_tracks)
-    acc_full_32bp   = ProfileCorrAccumulator(n_rna_tracks)
-    acc_central_1bp  = ProfileCorrAccumulator(n_rna_tracks)
-    acc_central_32bp = ProfileCorrAccumulator(n_rna_tracks)
+    # -- created/restored below, alongside the row lists, once resume state is loaded.
 
     # Strand-matched (track_idx, bw_idx) per strand:
     # Bigwigs ordered [s0/forward, s0/reverse, s1/forward, s1/reverse, ...]
@@ -735,19 +772,42 @@ def main() -> None:
     for gid, (iv_idx, _, _) in gene_interval_map.items():
         genes_per_interval[iv_idx].append(gid)
 
-    # --- Inference loop ---
-    rna_rows: list[dict] = []
-    rna_rows_32bp: list[dict] = []
-    splice_site_rows: list[dict] = []
-    ssu_rows: list[dict] = []
-    junction_rows: list[dict] = []
-    junction_total_rows: list[dict] = []
-    psi_rows: list[dict] = []
-    interval_corr_rows: list[dict] = []
-    pooled_profile_metrics_rows: list[dict] = []
-    track_totals_rows: list[dict] = []
+    # --- Inference loop (resumable — see "Resume support" above) ---
+    acc_names = [
+        "acc_exon_1bp", "acc_full_1bp", "acc_exon_32bp", "acc_full_32bp",
+        "acc_central_1bp", "acc_central_32bp",
+    ]
+    done_intervals, prior_state = _load_progress(args.output_dir)
+    if prior_state is not None:
+        print("Resuming: {} / {} intervals already done.".format(len(done_intervals), n_intervals))
+        row_lists = prior_state["row_lists"]
+        accumulators = {name: prior_state["accumulators"][name] for name in acc_names}
+    else:
+        row_lists = {
+            "rna_rows": [], "rna_rows_32bp": [], "splice_site_rows": [], "ssu_rows": [],
+            "junction_rows": [], "junction_total_rows": [], "psi_rows": [],
+            "interval_corr_rows": [], "pooled_profile_metrics_rows": [], "track_totals_rows": [],
+        }
+        accumulators = {name: ProfileCorrAccumulator(n_rna_tracks) for name in acc_names}
+
+    (acc_exon_1bp, acc_full_1bp, acc_exon_32bp, acc_full_32bp,
+     acc_central_1bp, acc_central_32bp) = (accumulators[name] for name in acc_names)
+
+    rna_rows = row_lists["rna_rows"]
+    rna_rows_32bp = row_lists["rna_rows_32bp"]
+    splice_site_rows = row_lists["splice_site_rows"]
+    ssu_rows = row_lists["ssu_rows"]
+    junction_rows = row_lists["junction_rows"]
+    junction_total_rows = row_lists["junction_total_rows"]
+    psi_rows = row_lists["psi_rows"]
+    interval_corr_rows = row_lists["interval_corr_rows"]
+    pooled_profile_metrics_rows = row_lists["pooled_profile_metrics_rows"]
+    track_totals_rows = row_lists["track_totals_rows"]
 
     for iv_idx, iv_row in test_intervals.iterrows():
+        if iv_idx in done_intervals:
+            continue
+
         chrom = iv_row["chrom"]
         iv_start = int(iv_row["start"])
         iv_end = int(iv_row["end"])
@@ -786,8 +846,13 @@ def main() -> None:
         # 32 bp binned version: truncate to full bins then mean-pool
         _n_full_bins = seq_len // 32
         rna_pred_32bp = rna_pred[:_n_full_bins * 32].reshape(_n_full_bins, 32, -1).mean(axis=1)  # (n_bins, n_rna_tracks)
-        cls_probs = outputs["splice_sites_classification"]["probs"].squeeze(0).cpu().float().numpy()  # (seq_len, 5)
-        usage_pred = outputs["splice_sites_usage"]["predictions"].squeeze(0).cpu().float().numpy()    # (seq_len, n_ssu_tracks)
+        # Output dict keys ('splice_sites', 'splice_site_usage') match the
+        # installed alphagenome_pytorch package's AlphaGenome.forward() as of
+        # this writing -- a prior package version used
+        # 'splice_sites_classification'/'splice_sites_usage' instead, which
+        # is why older runs against those checkpoints needed no such lookup.
+        cls_probs = outputs["splice_sites"]["probs"].squeeze(0).cpu().float().numpy()  # (seq_len, 5)
+        usage_pred = outputs["splice_site_usage"]["predictions"].squeeze(0).cpu().float().numpy()    # (seq_len, n_ssu_tracks)
         pred_counts = outputs["splice_sites_junction"]["pred_counts"].squeeze(0).cpu().float().numpy()  # (K, K, 2*n_junc_samples)
 
         # Fetch full-window observed coverage once for profile correlation accumulators
@@ -1129,6 +1194,14 @@ def main() -> None:
                             "pred_psi3": float(pred_psi3[d_idx, a_idx]),
                             "obs_psi3": float(obs_cnt / (acceptor_total[a_1] + _EPS)),
                         })
+
+        done_intervals.add(int(iv_idx))
+        if len(done_intervals) % _SAVE_EVERY == 0:
+            print("  Checkpointing progress: {}/{} intervals done.".format(len(done_intervals), n_intervals))
+            _save_progress(args.output_dir, done_intervals, row_lists, accumulators)
+
+    # Final progress save (covers the tail not aligned to _SAVE_EVERY)
+    _save_progress(args.output_dir, done_intervals, row_lists, accumulators)
 
     # --- Write parquets ---
     print("Writing parquets...")
