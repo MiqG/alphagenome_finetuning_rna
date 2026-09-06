@@ -98,6 +98,10 @@ finetuning:
     # our FOLD_1 test intervals the way the "all_folds" checkpoint would.
     kaggle_model_version: "fold_1"
     checkpoint_cache_dir: "data/raw/articles/Avsec2026/alphagenome_ft/kaggle_fold_1"
+    # Now packaged inside alphagenome_ft itself (mirrors finetuning.alphagenome's
+    # finetune_script pointing at src/alphagenome-pytorch/scripts/finetune.py) --
+    # its defaults are paper-equivalent to alphagenome-pytorch's out of the box.
+    finetune_script: "src/alphagenome_ft/scripts/finetune.py"
     sf3b1mut:
       output_dir: "results/finetuning/alphagenome_ft/full"
       sequence_length: 1048576

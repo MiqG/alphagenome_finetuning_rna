@@ -74,7 +74,7 @@ def _mode_args(wildcards):
 #   is invalid" above 12h, despite marathon being nominally available to our
 #   account there per sacctmgr — this looks like a separate, lower cap
 #   enforced specifically on this shared/billed partition). --resume auto
-#   (see finetune_alphagenome_jax.py) makes cycling through repeated 12h
+#   (see alphagenome_ft.finetune.runner) makes cycling through repeated 12h
 #   allocations, or bouncing between this and "h100", safe.
 GPU_PRESETS = {
     "h100": {"partition": "gpu_diasfrazer", "gres_type": "h100", "runtime": 7 * 24 * 60, "qos": "marathon"},
@@ -161,7 +161,7 @@ rule jax_full_finetune:
     benchmark:
         os.path.join(OUTPUT_DIR, "benchmarks", "{run_name}", "jax_full_finetune.tsv")
     params:
-        script          = os.path.join(SCRIPTS_DIR, "finetune_alphagenome_jax.py"),
+        script          = FT_CFG["finetune_script"],
         mode_args       = _mode_args,
         sequence_length = SF3B1_FT_CFG["sequence_length"],
         junction_position_source = SF3B1_FT_CFG["junction_position_source"],

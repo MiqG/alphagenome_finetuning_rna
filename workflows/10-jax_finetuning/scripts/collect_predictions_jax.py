@@ -11,10 +11,9 @@ accumulators, PSI/junction bookkeeping) is imported directly from
 collect_predictions.py rather than duplicated — only model loading and the
 per-interval forward pass differ (torch -> alphagenome_ft/JAX).
 
-Checkpoint is an orbax directory saved by
-workflows/10-jax_finetuning/scripts/finetune_alphagenome_jax.py (e.g.
-.../checkpoints/jax/probing_epoch10/last), not a single-file .pth like the
-PyTorch checkpoints.
+Checkpoint is an orbax directory saved by src/alphagenome_ft/scripts/finetune.py
+(e.g. .../checkpoints/jax/probing_epoch10/last), not a single-file .pth like
+the PyTorch checkpoints.
 
 Resumable: writes per-interval partial results under
 <output-dir>/.progress/ (not a declared Snakemake output — see this repo's
@@ -92,7 +91,7 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     p.add_argument("--checkpoint-path-file", required=True,
                    help="Text file containing the absolute path to the base Kaggle "
-                        "AlphaGenome-JAX checkpoint (see finetune_alphagenome_jax.py's "
+                        "AlphaGenome-JAX checkpoint (see alphagenome_ft.finetune.runner's "
                         "download_alphagenome_jax_weights rule).")
     p.add_argument("--checkpoint-dir", required=True,
                    help="Orbax finetuned checkpoint directory (e.g. .../probing_epoch10/last).")
@@ -104,7 +103,7 @@ def parse_args() -> argparse.Namespace:
                     help="Compute dtype for heads (must match what the checkpoint "
                          "was actually trained under). Default: auto-detected from "
                          "config.json alongside --checkpoint-dir's parent (written "
-                         "by finetune_alphagenome_jax.py); if that file doesn't "
+                         "by alphagenome_ft.finetune.runner); if that file doesn't "
                          "exist (e.g. a checkpoint trained before this dtype-"
                          "selection feature existed, when heads always silently "
                          "ran float32 regardless of any setting), falls back to "
@@ -113,7 +112,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--test-bed", required=True)
     p.add_argument("--train-bed", required=True,
                    help="Training-fold BED used to compute each rna_seq track's "
-                        "nonzero_mean, the same way finetune_alphagenome_jax.py "
+                        "nonzero_mean, the same way alphagenome_ft.finetune.runner "
                         "does at training time (must match exactly -- same bed, "
                         "same bigwigs, same --sequence-length, same "
                         "--track-means-samples -- since track_means is a plain "
@@ -124,7 +123,7 @@ def parse_args() -> argparse.Namespace:
                    help="Must match the --track-means-samples value used to train "
                         "this checkpoint (config['finetuning']['alphagenome_ft']"
                         "['sf3b1mut']['track_means_samples']). Default None means "
-                        "'all' train-bed windows, matching finetune_alphagenome_jax.py.")
+                        "'all' train-bed windows, matching alphagenome_ft.finetune.runner.")
     p.add_argument("--genome", required=True)
     p.add_argument("--gtf-parquet", required=True)
     p.add_argument("--bigwigs", nargs="+", required=True,
@@ -170,9 +169,8 @@ def load_finetuned_model_jax(
 ):
     """Reconstruct the finetuned JAX model from an orbax checkpoint directory.
 
-    Mirrors workflows/10-jax_finetuning/scripts/finetune_alphagenome_jax.py's
-    main() model-construction path (same 4 custom heads, same LoRA backbone
-    patch timing).
+    Mirrors alphagenome_ft.finetune.runner.main()'s model-construction path
+    (same 4 custom heads, same LoRA backbone patch timing).
 
     Does NOT use `alphagenome_ft.load_checkpoint()` for the restore step.
     xinming's checkpoints were trained with alphagenome-ft==0.1.7 (see
@@ -247,7 +245,7 @@ def load_finetuned_model_jax(
     # entry per bigwig for the head shape to match the checkpoint's real
     # n_rna_tracks.
     #
-    # nonzero_mean must be passed here, matching finetune_alphagenome_jax.py's
+    # nonzero_mean must be passed here, matching alphagenome_ft.finetune.runner's
     # own heads_cfg construction exactly. track_means is a plain Haiku array
     # (not hk.get_parameter), so it's never part of _params/_state and never
     # reaches the orbax checkpoint -- config.py's prepare_head_specs falls
@@ -417,7 +415,7 @@ def main() -> None:
         # --checkpoint-dir is the orbax "last"/"best" leaf; config.json (if
         # this checkpoint was trained after the dtype-selection feature
         # landed) lives one level up, alongside it -- see
-        # finetune_alphagenome_jax.py's config.json write.
+        # alphagenome_ft.finetune.runner's config.json write.
         config_path = os.path.join(os.path.dirname(os.path.normpath(args.checkpoint_dir)), "config.json")
         if os.path.exists(config_path):
             with open(config_path) as f:
@@ -437,8 +435,8 @@ def main() -> None:
     # same bed, same sequence_length, same subsetting, or every rna_seq
     # prediction below is silently rescaled by the wrong per-track factor.
     from pathlib import Path as _Path
-    from finetune_alphagenome_jax import _compute_track_means
-    track_means = _compute_track_means(
+    from alphagenome_ft.finetune.combined_data import compute_track_means
+    track_means = compute_track_means(
         args.bigwigs, _Path(args.train_bed), args.sequence_length, args.track_means_samples,
     )
 

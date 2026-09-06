@@ -45,9 +45,10 @@ XINMING_CHECKPOINT_SUBDIR = {
 
 EVAL_OUTPUT_DIR = "results/evaluation/alphagenome_ft/full"
 
-# collect_predictions_jax.py lives alongside finetune_alphagenome_jax.py;
-# SCRIPTS_DIR is defined by rules/finetune.smk (included before this file —
-# see ../Snakefile).
+# SCRIPTS_DIR (workflow-local scripts only, e.g. collect_predictions_jax.py)
+# is defined by rules/finetune.smk (included before this file — see
+# ../Snakefile). The finetuning driver itself now lives in alphagenome_ft
+# (config["finetuning"]["alphagenome_ft"]["finetune_script"]), not here.
 COLLECT_SCRIPT = os.path.join(SCRIPTS_DIR, "collect_predictions_jax.py")
 METRICS_SCRIPT = "src/scripts/compute_eval_metrics.py"
 
