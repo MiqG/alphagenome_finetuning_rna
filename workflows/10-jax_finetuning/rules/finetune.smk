@@ -10,11 +10,10 @@ alphagenome_ft package (splice-finetuning branch,
 Trains all 4 modalities jointly (rna_seq + splice_site + splice_usage +
 splice_junctions), matching workflows/05-full_finetuning/Snakefile's
 "randinit__newloss__annotated__frozen__multigpu_ddp" run as closely as the
-JAX/alphagenome_ft stack allows. See
-plans/10-jax-alphagenome_ft-reproduction.md ("Redo" section) for the
-remaining known differences (Kaggle-hosted weights instead of HuggingFace,
-no LoRA-parity, no pretrained-head-init for splice_site) that a straight
-comparison against the PyTorch run still needs to account for.
+JAX/alphagenome_ft stack allows. Remaining known difference: JAX loads a
+Kaggle-hosted checkpoint while PyTorch loads a HuggingFace-hosted one for
+the same fold — a different upstream artifact, not something a CLI flag
+can reconcile.
 
 Run with:
     snakemake -s workflows/10-jax_finetuning/Snakefile --use-conda [-n]
