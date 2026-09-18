@@ -55,6 +55,9 @@ import pyarrow.parquet as pq
 import pyBigWig
 import pyfaidx
 import pyranges as pr
+
+import evaluation_provenance
+import splice_site_annotation
 import torch
 
 from alphagenome_pytorch import AlphaGenome
@@ -612,7 +615,7 @@ def _progress_dir(output_dir: str) -> str:
     return d
 
 
-def _load_progress(output_dir: str):
+def _load_progress(output_dir: str, expected_fingerprint: str):
     """Return (done_interval_indices: set[int], state: dict | None) from any
     prior partial run, or (set(), None) if no checkpoint exists."""
     state_path = os.path.join(_progress_dir(output_dir), "state.pkl")
@@ -620,16 +623,20 @@ def _load_progress(output_dir: str):
         return set(), None
     with open(state_path, "rb") as f:
         state = pickle.load(f)
+    if state.get("fingerprint_sha256") != expected_fingerprint:
+        raise RuntimeError("Prediction progress fingerprint mismatch; use a new output directory.")
     return set(state["done_intervals"]), state
 
 
-def _save_progress(output_dir: str, done_intervals: set, row_lists: dict, accumulators: dict) -> None:
+def _save_progress(output_dir: str, done_intervals: set, row_lists: dict, accumulators: dict,
+                   fingerprint_sha256: str) -> None:
     state_path = os.path.join(_progress_dir(output_dir), "state.pkl")
     tmp_path = state_path + ".tmp"
     state = {
         "done_intervals": done_intervals,
         "row_lists": row_lists,
         "accumulators": accumulators,
+        "fingerprint_sha256": fingerprint_sha256,
     }
     with open(tmp_path, "wb") as f:
         pickle.dump(state, f)
@@ -649,6 +656,16 @@ def main() -> None:
     np.random.seed(args.seed)
 
     os.makedirs(args.output_dir, exist_ok=True)
+
+    # Labels in cached rows must use the same GTF, schema and collector code.
+    # This guard is label/CLI provenance, not a complete model-weight audit.
+    fingerprint = evaluation_provenance.build_fingerprint(
+        framework="pytorch",
+        settings={**vars(args), "gtf_label_schema": splice_site_annotation.LABEL_SCHEMA},
+        paths={"gtf_parquet": args.gtf_parquet},
+        code_paths=[__file__, splice_site_annotation.__file__, evaluation_provenance.__file__],
+    )
+    fingerprint_sha256 = evaluation_provenance.ensure_provenance(args.output_dir, fingerprint)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Device: {}  dtype: {}".format(device, args.dtype))
@@ -688,7 +705,7 @@ def main() -> None:
     print("Loading GTF exons...")
     gtf = pd.read_parquet(
         args.gtf_parquet,
-        columns=["Chromosome", "Start", "End", "Strand", "Feature", "gene_id", "gene_name"],
+        columns=["Chromosome", "Start", "End", "Strand", "Feature", "gene_id", "gene_name", "transcript_id"],
     )
     exons = (
         gtf[gtf["Feature"] == "exon"][
@@ -704,19 +721,8 @@ def main() -> None:
     exons_by_gene: dict[str, pd.DataFrame] = {
         gid: df for gid, df in exons.groupby("gene_id")
     }
-    # GTF splice sites set: {(chrom, pos_1based, strand, role)}
-    # Donor (+): End (0-based exclusive = last exon base 0-based = End-1, 1-based = End)
-    # Acceptor (+): Start (0-based = first exon base 0-based, 1-based = Start+1)
-    # For - strand: donor is Start+1 (1-based) and acceptor is End (1-based) — mirrors STAR convention
-    gtf_splice_sites: set[tuple[str, int, str, str]] = set()
-    for _, ex in exons.iterrows():
-        chrom, start, end, strand = ex["Chromosome"], int(ex["Start"]), int(ex["End"]), ex["Strand"]
-        if strand == "+":
-            gtf_splice_sites.add((chrom, end, "+", "donor"))       # 1-based End = last exon base +1 ...
-            gtf_splice_sites.add((chrom, start + 1, "+", "acceptor"))  # 1-based Start+1
-        else:
-            gtf_splice_sites.add((chrom, start + 1, "-", "donor"))
-            gtf_splice_sites.add((chrom, end, "-", "acceptor"))
+    # Use transcript junctions with the existing genomic-left/right role schema.
+    gtf_splice_sites = splice_site_annotation.gtf_splice_sites(gtf)
 
     # --- Load STAR junctions ---
     print("Loading STAR junctions...")
@@ -777,7 +783,7 @@ def main() -> None:
         "acc_exon_1bp", "acc_full_1bp", "acc_exon_32bp", "acc_full_32bp",
         "acc_central_1bp", "acc_central_32bp",
     ]
-    done_intervals, prior_state = _load_progress(args.output_dir)
+    done_intervals, prior_state = _load_progress(args.output_dir, fingerprint_sha256)
     if prior_state is not None:
         print("Resuming: {} / {} intervals already done.".format(len(done_intervals), n_intervals))
         row_lists = prior_state["row_lists"]
@@ -1198,10 +1204,10 @@ def main() -> None:
         done_intervals.add(int(iv_idx))
         if len(done_intervals) % _SAVE_EVERY == 0:
             print("  Checkpointing progress: {}/{} intervals done.".format(len(done_intervals), n_intervals))
-            _save_progress(args.output_dir, done_intervals, row_lists, accumulators)
+            _save_progress(args.output_dir, done_intervals, row_lists, accumulators, fingerprint_sha256)
 
     # Final progress save (covers the tail not aligned to _SAVE_EVERY)
-    _save_progress(args.output_dir, done_intervals, row_lists, accumulators)
+    _save_progress(args.output_dir, done_intervals, row_lists, accumulators, fingerprint_sha256)
 
     # --- Write parquets ---
     print("Writing parquets...")

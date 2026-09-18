@@ -62,6 +62,8 @@ _SRC_SCRIPTS_DIR = os.path.join(
     "src", "scripts",
 )
 sys.path.insert(0, _SRC_SCRIPTS_DIR)
+import evaluation_provenance  # noqa: E402
+import splice_site_annotation  # noqa: E402
 from collect_predictions import (  # noqa: E402
     read_star_junctions,
     pad_interval,
@@ -372,7 +374,7 @@ def _progress_dir(output_dir: str) -> str:
     return d
 
 
-def _load_progress(output_dir: str):
+def _load_progress(output_dir: str, expected_fingerprint: str):
     """Return (done_interval_indices: set[int], row_lists: dict, accumulators: dict) from
     any prior partial run, or empty defaults if none exists."""
     progress_dir = _progress_dir(output_dir)
@@ -381,10 +383,13 @@ def _load_progress(output_dir: str):
         return set(), None
     with open(state_path, "rb") as f:
         state = pickle.load(f)
+    if state.get("fingerprint_sha256") != expected_fingerprint:
+        raise RuntimeError("Prediction progress fingerprint mismatch; use a new output directory.")
     return set(state["done_intervals"]), state
 
 
-def _save_progress(output_dir: str, done_intervals: set, row_lists: dict, accumulators: dict) -> None:
+def _save_progress(output_dir: str, done_intervals: set, row_lists: dict, accumulators: dict,
+                   fingerprint_sha256: str) -> None:
     progress_dir = _progress_dir(output_dir)
     state_path = os.path.join(progress_dir, "state.pkl")
     tmp_path = state_path + ".tmp"
@@ -392,6 +397,7 @@ def _save_progress(output_dir: str, done_intervals: set, row_lists: dict, accumu
         "done_intervals": done_intervals,
         "row_lists": row_lists,
         "accumulators": accumulators,
+        "fingerprint_sha256": fingerprint_sha256,
     }
     with open(tmp_path, "wb") as f:
         pickle.dump(state, f)
@@ -407,6 +413,16 @@ def main() -> None:
     np.random.seed(args.seed)
 
     os.makedirs(args.output_dir, exist_ok=True)
+
+    # Labels in cached rows must use the same GTF, schema and collector code.
+    # This guard is label/CLI provenance, not a complete model-weight audit.
+    fingerprint = evaluation_provenance.build_fingerprint(
+        framework="jax",
+        settings={**vars(args), "gtf_label_schema": splice_site_annotation.LABEL_SCHEMA},
+        paths={"gtf_parquet": args.gtf_parquet},
+        code_paths=[__file__, splice_site_annotation.__file__, evaluation_provenance.__file__],
+    )
+    fingerprint_sha256 = evaluation_provenance.ensure_provenance(args.output_dir, fingerprint)
 
     with open(args.checkpoint_path_file) as f:
         base_checkpoint_path = f.read().strip()
@@ -498,7 +514,7 @@ def main() -> None:
     print("Loading GTF exons...")
     gtf = pd.read_parquet(
         args.gtf_parquet,
-        columns=["Chromosome", "Start", "End", "Strand", "Feature", "gene_id", "gene_name"],
+        columns=["Chromosome", "Start", "End", "Strand", "Feature", "gene_id", "gene_name", "transcript_id"],
     )
     exons = (
         gtf[gtf["Feature"] == "exon"][
@@ -512,15 +528,8 @@ def main() -> None:
     exons_by_gene: dict[str, pd.DataFrame] = {
         gid: df for gid, df in exons.groupby("gene_id")
     }
-    gtf_splice_sites: set[tuple[str, int, str, str]] = set()
-    for _, ex in exons.iterrows():
-        chrom, start, end, strand = ex["Chromosome"], int(ex["Start"]), int(ex["End"]), ex["Strand"]
-        if strand == "+":
-            gtf_splice_sites.add((chrom, end, "+", "donor"))
-            gtf_splice_sites.add((chrom, start + 1, "+", "acceptor"))
-        else:
-            gtf_splice_sites.add((chrom, start + 1, "-", "donor"))
-            gtf_splice_sites.add((chrom, end, "-", "acceptor"))
+    # Use transcript junctions with the existing genomic-left/right role schema.
+    gtf_splice_sites = splice_site_annotation.gtf_splice_sites(gtf)
 
     # --- Load STAR junctions ---
     print("Loading STAR junctions...")
@@ -573,7 +582,7 @@ def main() -> None:
         genes_per_interval[iv_idx].append(gid)
 
     # --- Resume state ---
-    done_intervals, prior_state = _load_progress(args.output_dir)
+    done_intervals, prior_state = _load_progress(args.output_dir, fingerprint_sha256)
     if prior_state is not None:
         print("Resuming: {} / {} intervals already done.".format(len(done_intervals), n_intervals))
         row_lists = prior_state["row_lists"]
@@ -954,10 +963,10 @@ def main() -> None:
         done_intervals.add(int(iv_idx))
         if len(done_intervals) % _SAVE_EVERY == 0:
             print("  Checkpointing progress: {}/{} intervals done.".format(len(done_intervals), n_intervals))
-            _save_progress(args.output_dir, done_intervals, row_lists, accumulators)
+            _save_progress(args.output_dir, done_intervals, row_lists, accumulators, fingerprint_sha256)
 
     # Final progress save (covers the tail not aligned to _SAVE_EVERY)
-    _save_progress(args.output_dir, done_intervals, row_lists, accumulators)
+    _save_progress(args.output_dir, done_intervals, row_lists, accumulators, fingerprint_sha256)
 
     # --- Write final parquets ---
     print("Writing parquets...")
