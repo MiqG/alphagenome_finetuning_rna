@@ -57,9 +57,11 @@ import pyfaidx
 import pyranges as pr
 import torch
 
+import evaluation_provenance
 from alphagenome_pytorch import AlphaGenome
 from alphagenome_pytorch.extensions.finetuning.heads import create_finetuning_head
 from alphagenome_pytorch.extensions.finetuning.star_junctions import (
+    gtf_splice_sites_to_junctions,
     normalize_junctions_per_sample,
 )
 from alphagenome_pytorch.extensions.finetuning.transfer import (
@@ -72,7 +74,7 @@ from alphagenome_pytorch.extensions.finetuning.transfer import (
 from alphagenome_pytorch.utils.sequence import sequence_to_onehot
 
 _EPS = 1e-8
-_MAX_SPLICE_SITES = 512
+_MAX_SPLICE_SITES = 256
 _CENTRAL_LENGTH = 196_608
 _CENTRAL_BINS_32BP = _CENTRAL_LENGTH // 32  # 6144
 
@@ -93,12 +95,29 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--samples", nargs="+", required=True,
                    help="Sample IDs (e.g. SRR17111303 SRR17111311), matching order of --ssu-parquets / --star-junctions")
     p.add_argument("--sequence-length", type=int, default=1_048_576)
+    p.add_argument(
+        "--max-splice-sites", type=int, default=_MAX_SPLICE_SITES,
+        help="Maximum annotated donor/acceptor sites per strand role. Use the "
+             "same value used for training and across frameworks.",
+    )
     p.add_argument("--output-dir", required=True)
     p.add_argument("--seed", type=int, default=42,
                    help="Random seed (kept for reproducibility of any future sampling)")
     p.add_argument(
         "--dtype", default="bfloat16", choices=["bfloat16", "float32"],
-        help="Inference dtype. Must match training dtype (bfloat16 for all finetuned runs here).",
+        help="Inference dtype. Must match the checkpoint's own training dtype "
+             "(read from its config.json by the caller) -- never assume bfloat16 "
+             "for a checkpoint you didn't train yourself.",
+    )
+    p.add_argument(
+        "--batch-size", type=int, default=1,
+        help="Number of test intervals per forward pass. Safe to increase: every "
+             "interval is padded/cropped to the same --sequence-length, so there is "
+             "no cross-example padding/masking, and the model's only "
+             "batch-named layer (RMSBatchNorm) uses a frozen running_var buffer, "
+             "not live batch statistics. Pick this from available GPU memory, e.g. "
+             "1 on 24GB, 4 on 40GB, 8 on 80GB. Verify with a batch=1 vs batch=N "
+             "parity check on a few intervals before trusting a full run at N>1.",
     )
     return p.parse_args()
 
@@ -123,9 +142,11 @@ def load_finetuned_model(
     use_bf16 = dtype == "bfloat16" and device.type == "cuda"
     dtype_policy = DtypePolicy.mixed_precision() if use_bf16 else DtypePolicy.full_float32()
 
-    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    track_names: dict = ckpt["track_names"]
-    resolutions: dict = ckpt["resolutions"]
+    ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    is_delta = "delta_checkpoint_version" in ckpt
+    checkpoint_metadata = ckpt.get("metadata", {}) if is_delta else ckpt
+    track_names: dict = checkpoint_metadata["track_names"]
+    resolutions: dict = checkpoint_metadata["resolutions"]
 
     # Training mode (linear-probe/lora/full) and adapter hyperparameters are not
     # stored in the checkpoint itself; they live in the run's config.json.
@@ -169,7 +190,23 @@ def load_finetuned_model(
         )
         model = prepare_for_transfer(model, transfer_config)
 
-    model.load_state_dict(ckpt["model_state_dict"])
+    if is_delta:
+        from alphagenome_pytorch.extensions.finetuning.checkpointing import (
+            load_delta_checkpoint,
+        )
+
+        # The base trunk, heads, and optional LoRA wrappers were reconstructed
+        # above; overlay only the sparse adapter/head/norm tensors stored in
+        # the delta checkpoint.
+        load_delta_checkpoint(
+            checkpoint_path,
+            model=model,
+            verify_hash=True,
+            strict=True,
+            skip_prepare=True,
+        )
+    else:
+        model.load_state_dict(ckpt["model_state_dict"])
     model.to(device)
     model.eval()
     return model, track_names
@@ -229,8 +266,9 @@ def build_annotated_positions(
     seq_len: int,
     iv_start: int,
     iv_end: int,
+    max_splice_sites: int = _MAX_SPLICE_SITES,
 ) -> np.ndarray:
-    """Build (4, MAX_SPLICE_SITES) int32 position array from merged STAR junctions.
+    """Build (4, max_splice_sites) int32 position array from merged STAR junctions.
 
     Roles: 0=Donor+, 1=Acceptor+, 2=Donor-, 3=Acceptor-
     Positions are 0-based relative to window_start.
@@ -259,11 +297,36 @@ def build_annotated_positions(
             if 0 <= a_rel < seq_len:
                 role_positions[3].add(a_rel)
 
-    result = np.full((4, _MAX_SPLICE_SITES), -1, dtype=np.int32)
+    if max_splice_sites <= 0:
+        raise ValueError("max_splice_sites must be positive")
+    result = np.full((4, max_splice_sites), -1, dtype=np.int32)
     for role_idx, pos_set in enumerate(role_positions):
-        selected = sorted(pos_set)[:_MAX_SPLICE_SITES]
+        selected = sorted(pos_set)[:max_splice_sites]
         result[role_idx, : len(selected)] = selected
     return result
+
+
+def build_gtf_splice_sites(gtf_parquet_path: str) -> set[tuple[str, int, str, str]]:
+    """Return the GTF-annotated splice site set: {(chrom, pos_1based, strand, role)}.
+
+    Built from gtf_splice_sites_to_junctions (the same function the PyTorch
+    training data loader uses), which pairs only exons ADJACENT WITHIN THE
+    SAME TRANSCRIPT -- not a gene-wide union of every isoform's exon
+    boundaries. A gene-level union mislabels positions that are a boundary in
+    one transcript but mid-exon in the transcript actually spliced there.
+    "donor"/"acceptor" here follow the existing STAR/SSU genomic-left/right
+    convention (left flank = donor on BOTH strands), matching
+    build_annotated_positions and the ssu_row["role"] values this set is
+    compared against.
+    """
+    gtf_juncs = gtf_splice_sites_to_junctions(gtf_parquet_path)
+    sites: set[tuple[str, int, str, str]] = set()
+    for chrom, exon_start, exon_end, strand in gtf_juncs[
+        ["chrom", "exon_start", "exon_end", "strand"]
+    ].itertuples(index=False, name=None):
+        sites.add((chrom, int(exon_start), strand, "donor"))
+        sites.add((chrom, int(exon_end), strand, "acceptor"))
+    return sites
 
 
 # ---------------------------------------------------------------------------
@@ -612,24 +675,40 @@ def _progress_dir(output_dir: str) -> str:
     return d
 
 
-def _load_progress(output_dir: str):
+def _load_progress(output_dir: str, expected_fingerprint: str):
     """Return (done_interval_indices: set[int], state: dict | None) from any
-    prior partial run, or (set(), None) if no checkpoint exists."""
+    prior partial run, or (set(), None) if no checkpoint exists.
+
+    Refuses to resume state left by a run with a different fingerprint
+    (different inputs, settings, or code) -- see evaluation_provenance.py.
+    """
     state_path = os.path.join(_progress_dir(output_dir), "state.pkl")
     if not os.path.exists(state_path):
         return set(), None
     with open(state_path, "rb") as f:
         state = pickle.load(f)
+    if state.get("fingerprint_sha256") != expected_fingerprint:
+        raise RuntimeError(
+            "Progress checkpoint fingerprint does not match provenance.json; "
+            "refusing to mix prediction runs."
+        )
     return set(state["done_intervals"]), state
 
 
-def _save_progress(output_dir: str, done_intervals: set, row_lists: dict, accumulators: dict) -> None:
+def _save_progress(
+    output_dir: str,
+    done_intervals: set,
+    row_lists: dict,
+    accumulators: dict,
+    fingerprint_sha256: str,
+) -> None:
     state_path = os.path.join(_progress_dir(output_dir), "state.pkl")
     tmp_path = state_path + ".tmp"
     state = {
         "done_intervals": done_intervals,
         "row_lists": row_lists,
         "accumulators": accumulators,
+        "fingerprint_sha256": fingerprint_sha256,
     }
     with open(tmp_path, "wb") as f:
         pickle.dump(state, f)
@@ -649,6 +728,53 @@ def main() -> None:
     np.random.seed(args.seed)
 
     os.makedirs(args.output_dir, exist_ok=True)
+
+    # A resume fingerprint must cover checkpoint/model-loading semantics too,
+    # not just this CLI's own args -- these modules contain the delta-checkpoint
+    # restoration and splice-site labeling logic used below.
+    from alphagenome_pytorch import attention as _pt_attention_source
+    from alphagenome_pytorch import heads as _pt_heads_source
+    from alphagenome_pytorch.extensions.finetuning import checkpointing as _pt_checkpoint_source
+    from alphagenome_pytorch.extensions.finetuning import star_junctions as _pt_star_junctions_source
+    run_config_path = os.path.join(os.path.dirname(args.checkpoint), "config.json")
+    fingerprint = evaluation_provenance.build_fingerprint(
+        framework="pytorch",
+        settings={
+            "dtype": args.dtype,
+            "sequence_length": args.sequence_length,
+            "max_splice_sites": args.max_splice_sites,
+            "batch_size": args.batch_size,
+            "seed": args.seed,
+            "samples": args.samples,
+            "bigwig_order": args.bigwigs,
+        },
+        paths={
+            "pretrained_weights": args.pretrained_weights,
+            "checkpoint": args.checkpoint,
+            "run_config": run_config_path,
+            "test_bed": args.test_bed,
+            "genome": args.genome,
+            "gtf_parquet": args.gtf_parquet,
+            "bigwigs": args.bigwigs,
+            "ssu_parquets": args.ssu_parquets,
+            "star_junctions": args.star_junctions,
+        },
+        code_paths=[
+            __file__,
+            evaluation_provenance.__file__,
+            # Model sources that change predictions for identical inputs, so a
+            # resumed run can never silently mix pre-/post-fix intervals:
+            # attention.py carries apply_rope (whose autocast/bf16 handling
+            # materially changes junction-head positional encodings) and
+            # heads.py the splice/junction head definitions.
+            _pt_attention_source.__file__,
+            _pt_heads_source.__file__,
+            _pt_checkpoint_source.__file__,
+            _pt_star_junctions_source.__file__,
+        ],
+    )
+    fingerprint_sha256 = evaluation_provenance.ensure_provenance(args.output_dir, fingerprint)
+    print("Evaluation fingerprint: {}".format(fingerprint_sha256))
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Device: {}  dtype: {}".format(device, args.dtype))
@@ -704,19 +830,7 @@ def main() -> None:
     exons_by_gene: dict[str, pd.DataFrame] = {
         gid: df for gid, df in exons.groupby("gene_id")
     }
-    # GTF splice sites set: {(chrom, pos_1based, strand, role)}
-    # Donor (+): End (0-based exclusive = last exon base 0-based = End-1, 1-based = End)
-    # Acceptor (+): Start (0-based = first exon base 0-based, 1-based = Start+1)
-    # For - strand: donor is Start+1 (1-based) and acceptor is End (1-based) — mirrors STAR convention
-    gtf_splice_sites: set[tuple[str, int, str, str]] = set()
-    for _, ex in exons.iterrows():
-        chrom, start, end, strand = ex["Chromosome"], int(ex["Start"]), int(ex["End"]), ex["Strand"]
-        if strand == "+":
-            gtf_splice_sites.add((chrom, end, "+", "donor"))       # 1-based End = last exon base +1 ...
-            gtf_splice_sites.add((chrom, start + 1, "+", "acceptor"))  # 1-based Start+1
-        else:
-            gtf_splice_sites.add((chrom, start + 1, "-", "donor"))
-            gtf_splice_sites.add((chrom, end, "-", "acceptor"))
+    gtf_splice_sites = build_gtf_splice_sites(args.gtf_parquet)
 
     # --- Load STAR junctions ---
     print("Loading STAR junctions...")
@@ -777,7 +891,7 @@ def main() -> None:
         "acc_exon_1bp", "acc_full_1bp", "acc_exon_32bp", "acc_full_32bp",
         "acc_central_1bp", "acc_central_32bp",
     ]
-    done_intervals, prior_state = _load_progress(args.output_dir)
+    done_intervals, prior_state = _load_progress(args.output_dir, fingerprint_sha256)
     if prior_state is not None:
         print("Resuming: {} / {} intervals already done.".format(len(done_intervals), n_intervals))
         row_lists = prior_state["row_lists"]
@@ -804,6 +918,55 @@ def main() -> None:
     pooled_profile_metrics_rows = row_lists["pooled_profile_metrics_rows"]
     track_totals_rows = row_lists["track_totals_rows"]
 
+    # --- Batched forward pass ---------------------------------------------
+    # Every interval is padded/cropped to the same --sequence-length, so
+    # batching is a plain stack along a new batch dim: no cross-example
+    # padding/attention-masking to get wrong. Results are cached per interval
+    # and consumed one at a time by the (otherwise unchanged) per-interval
+    # loop below, so a batch-size change touches only GPU throughput, not any
+    # of the per-interval bookkeeping/metric logic.
+    pending_order = [idx for idx in test_intervals.index if idx not in done_intervals]
+    pending_pos = {idx: i for i, idx in enumerate(pending_order)}
+    batch_cache: dict[int, tuple] = {}
+
+    def _run_forward_batch(iv_indices: list) -> None:
+        seq_list, pos_list, meta = [], [], []
+        for idx in iv_indices:
+            row = test_intervals.loc[idx]
+            c, s, e = row["chrom"], int(row["start"]), int(row["end"])
+            ws, we = pad_interval(s, e, args.sequence_length)
+            sl = we - ws
+            raw = str(fasta[c][max(0, ws):we]).upper()
+            if ws < 0:
+                raw = "N" * (-ws) + raw
+            if len(raw) < sl:  # chromosome-end overflow: pad on the right too
+                raw = raw + "N" * (sl - len(raw))
+            seq_list.append(sequence_to_onehot(raw))
+            pos = build_annotated_positions(
+                star_merged, c, ws, sl, s, e, max_splice_sites=args.max_splice_sites
+            )
+            pos_list.append(pos)
+            meta.append((ws, we, sl, pos))
+
+        seq_batch = torch.from_numpy(np.stack(seq_list)).float().to(device)
+        pos_batch = torch.from_numpy(np.stack(pos_list)).long().to(device)
+        with torch.no_grad():
+            outputs = model.predict(
+                seq_batch, organism_index=0, splice_site_positions=pos_batch
+            )
+        # Output dict keys ('splice_sites', 'splice_site_usage') match the
+        # installed alphagenome_pytorch package's AlphaGenome.forward() as of
+        # this writing -- a prior package version used
+        # 'splice_sites_classification'/'splice_sites_usage' instead, which
+        # is why older runs against those checkpoints needed no such lookup.
+        rna_b = outputs["rna_seq"][1].cpu().float().numpy()                        # (B, seq_len, n_rna_tracks)
+        cls_b = outputs["splice_sites"]["probs"].cpu().float().numpy()             # (B, seq_len, 5)
+        usg_b = outputs["splice_site_usage"]["predictions"].cpu().float().numpy()  # (B, seq_len, n_ssu_tracks)
+        cnt_b = outputs["splice_sites_junction"]["pred_counts"].cpu().float().numpy()  # (B, K, K, 2*n_junc_samples)
+        for b, idx in enumerate(iv_indices):
+            ws, we, sl, pos = meta[b]
+            batch_cache[idx] = (ws, we, sl, pos, rna_b[b], cls_b[b], usg_b[b], cnt_b[b])
+
     for iv_idx, iv_row in test_intervals.iterrows():
         if iv_idx in done_intervals:
             continue
@@ -815,45 +978,14 @@ def main() -> None:
         if iv_idx % 100 == 0:
             print("  Interval {}/{}: {}:{}-{}".format(iv_idx + 1, n_intervals, chrom, iv_start, iv_end))
 
-        window_start, window_end = pad_interval(iv_start, iv_end, args.sequence_length)
-        seq_len = window_end - window_start
-
-        # Load sequence
-        raw_seq = str(fasta[chrom][max(0, window_start):window_end]).upper()
-        if window_start < 0:
-            raw_seq = "N" * (-window_start) + raw_seq
-        seq_tensor = (
-            torch.from_numpy(sequence_to_onehot(raw_seq))
-            .float()
-            .unsqueeze(0)
-            .to(device)
-        )
-
-        # Build annotated junction positions
-        positions_np = build_annotated_positions(
-            star_merged, chrom, window_start, seq_len, iv_start, iv_end
-        )
-        positions_t = torch.from_numpy(positions_np).long().unsqueeze(0).to(device)
-
-        # Forward pass
-        with torch.no_grad():
-            outputs = model.predict(
-                seq_tensor, organism_index=0, splice_site_positions=positions_t
-            )
-
-        # Extract outputs to CPU numpy
-        rna_pred = outputs["rna_seq"][1].squeeze(0).cpu().float().numpy()         # (seq_len, n_rna_tracks)
+        if iv_idx not in batch_cache:
+            cursor = pending_pos[iv_idx]
+            _run_forward_batch(pending_order[cursor:cursor + args.batch_size])
+        (window_start, window_end, seq_len, positions_np,
+         rna_pred, cls_probs, usage_pred, pred_counts) = batch_cache.pop(iv_idx)
         # 32 bp binned version: truncate to full bins then mean-pool
         _n_full_bins = seq_len // 32
         rna_pred_32bp = rna_pred[:_n_full_bins * 32].reshape(_n_full_bins, 32, -1).mean(axis=1)  # (n_bins, n_rna_tracks)
-        # Output dict keys ('splice_sites', 'splice_site_usage') match the
-        # installed alphagenome_pytorch package's AlphaGenome.forward() as of
-        # this writing -- a prior package version used
-        # 'splice_sites_classification'/'splice_sites_usage' instead, which
-        # is why older runs against those checkpoints needed no such lookup.
-        cls_probs = outputs["splice_sites"]["probs"].squeeze(0).cpu().float().numpy()  # (seq_len, 5)
-        usage_pred = outputs["splice_site_usage"]["predictions"].squeeze(0).cpu().float().numpy()    # (seq_len, n_ssu_tracks)
-        pred_counts = outputs["splice_sites_junction"]["pred_counts"].squeeze(0).cpu().float().numpy()  # (K, K, 2*n_junc_samples)
 
         # Fetch full-window observed coverage once for profile correlation accumulators
         obs_window = fetch_obs_window(bigwigs, chrom, window_start, window_end, chrom_sizes)
@@ -1198,10 +1330,10 @@ def main() -> None:
         done_intervals.add(int(iv_idx))
         if len(done_intervals) % _SAVE_EVERY == 0:
             print("  Checkpointing progress: {}/{} intervals done.".format(len(done_intervals), n_intervals))
-            _save_progress(args.output_dir, done_intervals, row_lists, accumulators)
+            _save_progress(args.output_dir, done_intervals, row_lists, accumulators, fingerprint_sha256)
 
     # Final progress save (covers the tail not aligned to _SAVE_EVERY)
-    _save_progress(args.output_dir, done_intervals, row_lists, accumulators)
+    _save_progress(args.output_dir, done_intervals, row_lists, accumulators, fingerprint_sha256)
 
     # --- Write parquets ---
     print("Writing parquets...")

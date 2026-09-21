@@ -35,9 +35,9 @@ JAX_PAPER_MODELS = {
     "AlphaGenome-PyTorch, xinming (probing)":
         os.path.join("results", "evaluation", "alphagenome_pytorch_xinming", "full",
                       "randinit__newloss__annotated__frozen__multigpu_ddp", "epoch10", "test", "predictions"),
-    "AlphaGenome-PyTorch, xinming (LoRA, epoch7 partial)":
+    "AlphaGenome-PyTorch, xinming (LoRA)":
         os.path.join("results", "evaluation", "alphagenome_pytorch_xinming", "full",
-                      "randinit__newloss__annotated__lora__largegpu__nowarmup", "epoch7", "test", "predictions"),
+                      "randinit__newloss__annotated__lora__largegpu__nowarmup", "epoch10", "test", "predictions"),
     "AlphaGenome-JAX (probing)":
         os.path.join("results", "evaluation", "alphagenome_ft", "full",
                       "randinit__annotated__frozen__probing_jax", "test", "predictions"),

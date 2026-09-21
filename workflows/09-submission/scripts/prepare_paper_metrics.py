@@ -36,6 +36,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import gc
 import os
 
 import numpy as np
@@ -237,23 +238,38 @@ def load_test_windows(test_bed: str, sequence_length: int) -> pd.DataFrame:
 def select_max_context_junction_rows(df: pd.DataFrame, windows: pd.DataFrame) -> pd.DataFrame:
     """Per (junction, sample), keep only the row whose window best centers both breakpoints.
 
-    junction_scores.parquet already carries `interval_idx`, so this is a
-    straightforward vectorized merge + groupby-idxmax (no reconstruction needed).
+    junction_scores.parquet runs into hundreds of millions of rows for the JAX
+    models, so unlike the old merge-based approach (which duplicated every
+    column of `df` just to attach two window-bound columns), window bounds are
+    looked up via plain numpy fancy indexing on `interval_idx` -- `windows`'
+    `iv_idx` is contiguous 0..N-1 (see load_test_windows), so it can be used
+    directly as an array index instead of a join.
     """
-    win = windows[["iv_idx", "window_start", "window_end"]].rename(columns={"iv_idx": "interval_idx"})
-    merged = df.merge(win, on="interval_idx", how="left")
+    n_windows = int(windows["iv_idx"].max()) + 1
+    window_start = np.zeros(n_windows, dtype=np.int64)
+    window_end = np.zeros(n_windows, dtype=np.int64)
+    window_start[windows["iv_idx"].to_numpy()] = windows["window_start"].to_numpy()
+    window_end[windows["iv_idx"].to_numpy()] = windows["window_end"].to_numpy()
 
-    donor = merged["donor_pos_1based"].to_numpy() - 1
-    acceptor = merged["acceptor_pos_1based"].to_numpy() - 1
-    ws = merged["window_start"].to_numpy()
-    we = merged["window_end"].to_numpy()
-    clearance = np.minimum.reduce([donor - ws, we - donor, acceptor - ws, we - acceptor])
-    merged["_clearance"] = clearance
+    interval_idx = df["interval_idx"].to_numpy()
+    ws = window_start[interval_idx]
+    we = window_end[interval_idx]
+    donor = df["donor_pos_1based"].to_numpy() - 1
+    acceptor = df["acceptor_pos_1based"].to_numpy() - 1
+    clearance = np.minimum(np.minimum(donor - ws, we - donor), np.minimum(acceptor - ws, we - acceptor))
 
+    # groupby(...).idxmax() over ~100M rows, where most (chrom, donor,
+    # acceptor, strand, sample_id) keys are already unique (duplicates only
+    # come from a junction falling inside >1 overlapping test window), forces
+    # pandas to build a hash table sized for ~100M mostly-distinct groups.
+    # Sorting by clearance and taking the first row per key via
+    # drop_duplicates uses the same underlying hashing machinery but without
+    # materializing a per-group reduction.
     key = JUNC_KEY + ["sample_id"]
-    best_idx = merged.groupby(key)["_clearance"].idxmax()
-    best = merged.loc[best_idx].drop(columns=["window_start", "window_end", "interval_idx", "_clearance"])
-    return best.reset_index(drop=True)
+    out = df.assign(_clearance=clearance)
+    out = out.sort_values("_clearance", ascending=False, kind="mergesort")
+    out = out.drop_duplicates(subset=key, keep="first")
+    return out.drop(columns="_clearance").reset_index(drop=True)
 
 
 def _containing_windows_long(chroms_pos: pd.DataFrame, windows: pd.DataFrame) -> pd.DataFrame:
@@ -584,24 +600,39 @@ def prepare_junctions(args) -> pd.DataFrame:
 
     windows = load_test_windows(args.test_bed, args.sequence_length)
 
-    dedups = {}
+    # Junction predictions run into the hundreds of millions of rows per
+    # model (JAX runs in particular), so unlike prepare_ssu (whose per-model
+    # files are tiny) we never hold more than one model's deduped dataframe
+    # in memory at once -- site_specificity only needs the first model's
+    # dedup (identical obs_count across models for the same ground truth),
+    # and each model's Pearson rows are computed and the dataframe dropped
+    # before moving to the next model.
+    wt_specific = k700e_specific = shared = None
+    records = []
     for model_label, pred_dir in _ag_pred_dirs(args).items():
         junc_df = pd.read_parquet(os.path.join(pred_dir, "junction_scores.parquet"))
-        dedups[model_label] = select_max_context_junction_rows(junc_df, windows)
+        dedup = select_max_context_junction_rows(junc_df, windows)
+        del junc_df
 
-    wt_specific, k700e_specific, shared = site_specificity(next(iter(dedups.values())), JUNC_KEY, "obs_count")
+        if shared is None:
+            wt_specific, k700e_specific, shared = site_specificity(dedup, JUNC_KEY, "obs_count")
 
-    records = []
-    for model_label, df in dedups.items():
         for setting, key_set in [
             ("general", None),
             ("shared", shared),
             ("wt_specific", wt_specific),
             ("k700e_specific", k700e_specific),
         ]:
-            for row in junction_pearson_rows(filter_by_key(df, JUNC_KEY, key_set), model_label):
+            for row in junction_pearson_rows(filter_by_key(dedup, JUNC_KEY, key_set), model_label):
                 row["setting"] = setting
                 records.append(row)
+        del dedup
+        # Categorical dtypes / BlockManager internals used above leave
+        # reference cycles pandas doesn't drop immediately -- without an
+        # explicit collect, usage creeps up across the 6-model loop instead
+        # of each iteration's ~100M-row frame actually being freed before
+        # the next model's read_parquet.
+        gc.collect()
 
     df = pd.DataFrame(records)
     df["setting_label"] = df["setting"].map(labels)

@@ -13,7 +13,7 @@ Snakefile's runs as closely as the JAX/alphagenome_ft stack allows, and
 behaves exactly as if finetuning were run locally on this cluster.
 
 rules/evaluate.smk evaluates finetuned checkpoints on the FOLD_1 test set —
-but against results/xinming/alphagenome_finetuning_downstream_2026-08-31/,
+but against results/xinming/20260918/runs/jax_historical_reference/,
 a results package from xinming's rerun of this same finetuning on their own
 cluster (ours was too slow), not against rules/finetune.smk's own output.
 This lets evaluation run today without waiting on a local finetuning run to

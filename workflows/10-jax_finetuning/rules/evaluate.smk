@@ -3,12 +3,18 @@ JAX finetuning workflow — evaluation of xinming's probing/lora runs.
 
 Xinming reran this workflow's finetuning on their own cluster (ours was too
 slow) and shipped back a results package, unpacked at
-results/xinming/alphagenome_finetuning_downstream_2026-08-31/. It contains
-one final (epoch 10) orbax checkpoint per run — "probing_jax" and "lora_jax"
-— each saved as both a "best" (best val loss) and "last" (final epoch) dir;
-this workflow evaluates the "last" checkpoint of each, matching the single
-final checkpoint each PyTorch run (workflows/06-evaluation/Snakefile)
-evaluates.
+results/xinming/20260918/runs/jax_historical_reference/ (supersedes the
+earlier results/xinming/alphagenome_finetuning_downstream_2026-08-31/
+package: that path has since moved to results/xinming/20260831/... and its
+JAX checkpoint is an older training run -- confirmed via train_state.json's
+best_value/epochs_since_improvement differing from the new package's, and
+file timestamps 2026-08-29 vs 2026-09-05 -- despite the new package's own
+README describing its JAX checkpoints as "not newly retrained"). It
+contains one final (epoch 10) orbax checkpoint per run — "probing" and
+"lora" — each saved as both a "best" (best val loss) and "last" (final
+epoch) dir; this workflow evaluates the "last" checkpoint of each, matching
+the single final checkpoint each PyTorch run (workflows/06-evaluation/
+Snakefile) evaluates.
 
 For each (run, subset) pair, runs:
   1. collect_predictions  — single-GPU JAX inference on <subset>.bed
@@ -37,10 +43,10 @@ BIGWIG_STRANDS = ["forward", "reverse"]
 
 # Xinming's results package — see module docstring. Only the "last" (final
 # epoch 10) checkpoint of each run is evaluated here.
-XINMING_DIR = "results/xinming/alphagenome_finetuning_downstream_2026-08-31"
+XINMING_DIR = "results/xinming/20260918/runs/jax_historical_reference"
 XINMING_CHECKPOINT_SUBDIR = {
-    SF3B1_FT_CFG["runs"]["probing_jax"]["run_name"]: "probing_epoch10",
-    SF3B1_FT_CFG["runs"]["lora_jax"]["run_name"]: "lora_epoch10",
+    SF3B1_FT_CFG["runs"]["probing_jax"]["run_name"]: "probing",
+    SF3B1_FT_CFG["runs"]["lora_jax"]["run_name"]: "lora",
 }
 
 EVAL_OUTPUT_DIR = "results/evaluation/alphagenome_ft/full"
@@ -65,6 +71,33 @@ SUBSET_BED = {
 # ALL_RUNS/_mode_args use, so the model reconstructed for evaluation exactly
 # matches the one xinming trained.
 EVAL_RUNS = list(XINMING_CHECKPOINT_SUBDIR.keys())
+
+# Job-level parallelism for the two collect_predictions jobs (probing_jax,
+# lora_jax): pin each to a different physical GPU so they run concurrently
+# instead of both queueing for the single GPU_CFG target, mirroring
+# workflows/11-xinming_pytorch_evaluation/Snakefile's GPU_POOL pattern.
+# Only 2 entries needed since there are only 2 EVAL_RUNS. Reuses
+# finetune.smk's GPU_PRESETS so each tier's runtime/qos stays consistent
+# with the partition's actual cap (the "gpu" partition's 7g.80gb rejects
+# --time beyond ~12h -- see finetune.smk's GPU_PRESETS comment).
+_JAX_GPU_POOL = [GPU_PRESETS["h100"], GPU_PRESETS["mig"]]
+_JAX_GPU_ASSIGNMENT = dict(zip(EVAL_RUNS, _JAX_GPU_POOL))
+
+
+def _jax_gpu_partition(wildcards):
+    return _JAX_GPU_ASSIGNMENT[wildcards.run_name]["partition"]
+
+
+def _jax_gpu_gres(wildcards):
+    return "gpu:{}:1".format(_JAX_GPU_ASSIGNMENT[wildcards.run_name]["gres_type"])
+
+
+def _jax_gpu_runtime(wildcards):
+    return _JAX_GPU_ASSIGNMENT[wildcards.run_name]["runtime"]
+
+
+def _jax_gpu_qos(wildcards):
+    return _JAX_GPU_ASSIGNMENT[wildcards.run_name]["qos"]
 
 
 # ---------------------------------------------------------------------------
@@ -100,7 +133,7 @@ def _interval_bed(wildcards):
 
 def _checkpoint_dir(wildcards):
     return os.path.join(
-        XINMING_DIR, "checkpoints", "jax",
+        XINMING_DIR,
         XINMING_CHECKPOINT_SUBDIR[wildcards.run_name], "last",
     )
 
@@ -150,11 +183,11 @@ rule collect_predictions:
         os.path.join(EVAL_OUTPUT_DIR, "benchmarks", "{run_name}", "{subset}", "collect_predictions.tsv")
     threads: 20
     resources:
-        runtime   = GPU_CFG["runtime"],
+        runtime   = _jax_gpu_runtime,
         memory    = 128,
-        gres      = "gpu:{}:1".format(GPU_CFG["gres_type"]),
-        partition = GPU_CFG["partition"],
-        qos       = GPU_CFG["qos"],
+        gres      = _jax_gpu_gres,
+        partition = _jax_gpu_partition,
+        qos       = _jax_gpu_qos,
     conda:
         "alphagenome"
     # Generous: covers the case where JAX inference on the "mig" GPU target

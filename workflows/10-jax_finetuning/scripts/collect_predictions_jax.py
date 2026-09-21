@@ -67,6 +67,7 @@ from collect_predictions import (  # noqa: E402
     pad_interval,
     centered_window,
     build_annotated_positions,
+    build_gtf_splice_sites,
     merge_gene_exons,
     compute_gene_interval_map,
     get_exon_mean_pred,
@@ -372,19 +373,35 @@ def _progress_dir(output_dir: str) -> str:
     return d
 
 
-def _load_progress(output_dir: str):
+def _load_progress(output_dir: str, expected_fingerprint: str):
     """Return (done_interval_indices: set[int], row_lists: dict, accumulators: dict) from
-    any prior partial run, or empty defaults if none exists."""
+    any prior partial run, or empty defaults if none exists.
+
+    Refuses to resume state left by a run with a different fingerprint
+    (different checkpoint, inputs, settings or code) -- see
+    src/scripts/evaluation_provenance.py. Without this guard, pointing this
+    script at a NEW checkpoint while an OLD run's .progress/state.pkl is
+    still sitting in the output dir silently re-emits the old run's cached
+    rows instead of recomputing anything (observed in practice: a rerun
+    against a new checkpoint "finished" in 19 minutes and produced a
+    byte-identical splice_site_scores.parquet).
+    """
     progress_dir = _progress_dir(output_dir)
     state_path = os.path.join(progress_dir, "state.pkl")
     if not os.path.exists(state_path):
         return set(), None
     with open(state_path, "rb") as f:
         state = pickle.load(f)
+    if state.get("fingerprint_sha256") != expected_fingerprint:
+        raise RuntimeError(
+            "Progress checkpoint fingerprint does not match provenance.json; "
+            "refusing to mix prediction runs. Delete {} to start fresh.".format(progress_dir)
+        )
     return set(state["done_intervals"]), state
 
 
-def _save_progress(output_dir: str, done_intervals: set, row_lists: dict, accumulators: dict) -> None:
+def _save_progress(output_dir: str, done_intervals: set, row_lists: dict, accumulators: dict,
+                    fingerprint_sha256: str) -> None:
     progress_dir = _progress_dir(output_dir)
     state_path = os.path.join(progress_dir, "state.pkl")
     tmp_path = state_path + ".tmp"
@@ -392,6 +409,7 @@ def _save_progress(output_dir: str, done_intervals: set, row_lists: dict, accumu
         "done_intervals": done_intervals,
         "row_lists": row_lists,
         "accumulators": accumulators,
+        "fingerprint_sha256": fingerprint_sha256,
     }
     with open(tmp_path, "wb") as f:
         pickle.dump(state, f)
@@ -429,6 +447,43 @@ def main() -> None:
                   "float32 regardless of any setting. Defaulting eval dtype to "
                   "float32 to match that historical training behavior (not "
                   "bfloat16). Pass --dtype explicitly to override.".format(config_path))
+
+    # Resume fingerprint: covers the checkpoint, every input path, the CLI
+    # settings and this script's own code, so a rerun pointed at a DIFFERENT
+    # checkpoint can never silently reuse a previous run's .progress rows
+    # (see _load_progress).
+    import evaluation_provenance
+    fingerprint = evaluation_provenance.build_fingerprint(
+        framework="jax",
+        settings={
+            "dtype": args.dtype,
+            "mode": args.mode,
+            "lora_rank": args.lora_rank,
+            "lora_alpha": args.lora_alpha,
+            "lora_targets": args.lora_targets,
+            "sequence_length": args.sequence_length,
+            "max_splice_sites": args.max_splice_sites,
+            "junction_position_source": args.junction_position_source,
+            "track_means_samples": args.track_means_samples,
+            "seed": args.seed,
+            "samples": args.samples,
+            "bigwig_order": args.bigwigs,
+        },
+        paths={
+            "checkpoint_dir": args.checkpoint_dir,
+            "checkpoint_path_file": args.checkpoint_path_file,
+            "test_bed": args.test_bed,
+            "train_bed": args.train_bed,
+            "genome": args.genome,
+            "gtf_parquet": args.gtf_parquet,
+            "bigwigs": args.bigwigs,
+            "ssu_parquets": args.ssu_parquets,
+            "star_junctions": args.star_junctions,
+        },
+        code_paths=[__file__, evaluation_provenance.__file__],
+    )
+    fingerprint_sha256 = evaluation_provenance.ensure_provenance(args.output_dir, fingerprint)
+    print("Evaluation fingerprint: {}".format(fingerprint_sha256))
 
     # rna_seq track_means must be recomputed exactly as at training time (see
     # load_finetuned_model_jax's rna_seq heads_cfg comment) -- same bigwigs,
@@ -512,15 +567,10 @@ def main() -> None:
     exons_by_gene: dict[str, pd.DataFrame] = {
         gid: df for gid, df in exons.groupby("gene_id")
     }
-    gtf_splice_sites: set[tuple[str, int, str, str]] = set()
-    for _, ex in exons.iterrows():
-        chrom, start, end, strand = ex["Chromosome"], int(ex["Start"]), int(ex["End"]), ex["Strand"]
-        if strand == "+":
-            gtf_splice_sites.add((chrom, end, "+", "donor"))
-            gtf_splice_sites.add((chrom, start + 1, "+", "acceptor"))
-        else:
-            gtf_splice_sites.add((chrom, start + 1, "-", "donor"))
-            gtf_splice_sites.add((chrom, end, "-", "acceptor"))
+    # Reuses collect_predictions.build_gtf_splice_sites: pairs only exons
+    # adjacent within the same transcript (matching both frameworks' training
+    # data loaders), not a gene-wide union of every isoform's exon boundaries.
+    gtf_splice_sites = build_gtf_splice_sites(args.gtf_parquet)
 
     # --- Load STAR junctions ---
     print("Loading STAR junctions...")
@@ -573,7 +623,7 @@ def main() -> None:
         genes_per_interval[iv_idx].append(gid)
 
     # --- Resume state ---
-    done_intervals, prior_state = _load_progress(args.output_dir)
+    done_intervals, prior_state = _load_progress(args.output_dir, fingerprint_sha256)
     if prior_state is not None:
         print("Resuming: {} / {} intervals already done.".format(len(done_intervals), n_intervals))
         row_lists = prior_state["row_lists"]
@@ -954,10 +1004,10 @@ def main() -> None:
         done_intervals.add(int(iv_idx))
         if len(done_intervals) % _SAVE_EVERY == 0:
             print("  Checkpointing progress: {}/{} intervals done.".format(len(done_intervals), n_intervals))
-            _save_progress(args.output_dir, done_intervals, row_lists, accumulators)
+            _save_progress(args.output_dir, done_intervals, row_lists, accumulators, fingerprint_sha256)
 
     # Final progress save (covers the tail not aligned to _SAVE_EVERY)
-    _save_progress(args.output_dir, done_intervals, row_lists, accumulators)
+    _save_progress(args.output_dir, done_intervals, row_lists, accumulators, fingerprint_sha256)
 
     # --- Write final parquets ---
     print("Writing parquets...")

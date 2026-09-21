@@ -45,11 +45,13 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import os
 
 import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
 from scipy.stats import pearsonr
 from sklearn.metrics import average_precision_score  # used by splice site metrics
 
@@ -267,68 +269,159 @@ def compute_ssu_metrics(df: pd.DataFrame, suffix: str = "") -> dict[str, float]:
 # Junction metrics
 # ---------------------------------------------------------------------------
 
-def compute_junction_metrics(
-    df: pd.DataFrame,
+def _average_precision_with_synthetic_zero_negatives(
+    scores: np.ndarray,
+    positives: np.ndarray,
+    n_synthetic_zero_negatives: int,
+) -> float | None:
+    """Exact non-interpolated AP without allocating the synthetic denominator.
+
+    The original ``compute_junction_metrics`` appended every omitted K×K pair
+    as an explicit score-zero negative before calling sklearn. There can be
+    hundreds of millions of those rows. AP can instead be computed from the
+    cumulative precision at each distinct stored score, adding the omitted
+    negatives only to the score-zero (and any lower) threshold denominator.
+    This is algebraically identical to sklearn's binary average precision.
+    """
+    scores = np.asarray(scores, dtype=np.float32)
+    positives = np.asarray(positives, dtype=np.bool_)
+    n_positive = int(positives.sum())
+    if n_positive == 0 or len(scores) < 2:
+        return None
+    if not np.isfinite(scores).all() or (scores < 0).any():
+        raise ValueError("Junction prediction scores must be finite and nonnegative")
+
+    # sklearn.metrics._ranking._binary_clf_curve uses the same stable sort.
+    order = np.argsort(scores, kind="mergesort")[::-1]
+    sorted_scores = scores[order]
+    sorted_positive = positives[order]
+    distinct_ends = np.r_[
+        np.flatnonzero(np.diff(sorted_scores)),
+        len(sorted_scores) - 1,
+    ]
+    true_positives = np.cumsum(sorted_positive, dtype=np.int64)[distinct_ends]
+    threshold_totals = distinct_ends.astype(np.int64) + 1
+    threshold_scores = sorted_scores[distinct_ends]
+    if n_synthetic_zero_negatives:
+        threshold_totals = threshold_totals + (
+            threshold_scores <= 0
+        ).astype(np.int64) * int(n_synthetic_zero_negatives)
+    precision = true_positives / threshold_totals
+    positives_at_threshold = np.diff(np.r_[0, true_positives])
+    return float(np.sum(precision * positives_at_threshold) / n_positive)
+
+
+def _junction_sample_ids(path: str, totals_df: pd.DataFrame) -> list[str]:
+    if not totals_df.empty and "sample_id" in totals_df.columns:
+        return sorted(str(value) for value in totals_df["sample_id"].dropna().unique())
+    sample_ids: set[str] = set()
+    parquet = pq.ParquetFile(path)
+    for batch in parquet.iter_batches(columns=["sample_id"], batch_size=262_144):
+        sample_ids.update(str(value) for value in batch.column(0).unique().to_pylist())
+    return sorted(sample_ids)
+
+
+def compute_junction_metrics_from_parquet(
+    path: str,
     totals_df: pd.DataFrame,
-    suffix: str = "",
+    min_counts: list[int],
 ) -> dict[str, float]:
-    """Junction auPRC and count Pearson R.
+    """Junction auPRC and count Pearson R, computed with bounded memory.
 
     auPRC uses the full K×K denominator by reconstructing zero-score negatives
     from junction_totals.parquet (n_valid_pairs per interval/strand/sample).
     Pairs with pred=0 AND obs=0 were dropped at collection time; they are
     added back as synthetic zero-score negatives so the denominator is correct.
 
-    suffix: appended to all metric names, e.g. "_mincount5".
+    Reads one sample's rows from the parquet at a time (only the four numeric
+    columns needed), rather than materializing the full junction_scores table
+    in pandas -- that table can be ~100M rows of coordinate/string columns.
+    Computes both the unfiltered metrics and, for each entry in min_counts > 1,
+    a "_mincountN" filtered variant (raw >= N kept as positives, raw == 0 kept
+    as negatives, noisy 0 < raw < N singletons excluded) in the same pass.
     """
     metrics: dict[str, float] = {}
+    totals = (
+        totals_df.groupby("sample_id")["n_valid_pairs"].sum().to_dict()
+        if not totals_df.empty else {}
+    )
+    variants = [("", None)] + [
+        ("_mincount{}".format(value), value)
+        for value in (min_counts or []) if value > 1
+    ]
+    auprc_values = {suffix: [] for suffix, _ in variants}
+    pearson_values = {suffix: [] for suffix, _ in variants}
+    schema_names = set(pq.ParquetFile(path).schema_arrow.names)
+    raw_column = "obs_count_raw" if "obs_count_raw" in schema_names else "obs_count"
+    numeric_columns = ["pred_count", "obs_count"]
+    if raw_column not in numeric_columns:
+        numeric_columns.append(raw_column)
 
-    if df.empty:
-        return metrics
-
-    # Total valid pairs per sample (sum n_valid_pairs across all intervals and strands)
-    n_total_per_sample: dict[str, int] = {}
-    if not totals_df.empty:
-        n_total_per_sample = totals_df.groupby("sample_id")["n_valid_pairs"].sum().to_dict()
-
-    # auPRC — reconstruct correct denominator
-    auprc_vals = []
-    for sample_id, grp in df.groupby("sample_id"):
-        y_score = grp["pred_count"].values.astype(np.float32)
-        y_true = (grp["obs_count"].values > 0).astype(np.int8)
-        n_stored = len(y_score)
-        n_total = int(n_total_per_sample.get(sample_id, n_stored))
-        n_synthetic = max(0, n_total - n_stored)
-
-        if n_synthetic > 0:
-            y_score = np.concatenate([y_score, np.zeros(n_synthetic, dtype=np.float32)])
-            y_true = np.concatenate([y_true, np.zeros(n_synthetic, dtype=np.int8)])
-
-        if y_true.sum() == 0 or len(y_true) < 2:
-            continue
-        ap = average_precision_score(y_true, y_score)
-        metrics["junction_auprc{}_{}" .format(suffix, sample_id)] = float(ap)
-        auprc_vals.append(ap)
-
-    if auprc_vals:
-        metrics["junction_auprc{}_mean".format(suffix)] = float(np.mean(auprc_vals))
-
-    # Count Pearson R (log1p, non-zero observed junctions only)
-    pearson_vals = []
-    for sample_id, grp in df.groupby("sample_id"):
-        sub = grp[grp["obs_count"] > 0]
-        if len(sub) < 3:
-            continue
-        r = safe_pearson(
-            np.log1p(sub["pred_count"].values),
-            np.log1p(sub["obs_count"].values),
+    for sample_id in _junction_sample_ids(path, totals_df):
+        table = pq.read_table(
+            path,
+            columns=numeric_columns,
+            filters=[("sample_id", "=", sample_id)],
         )
-        if r is not None:
-            metrics["junction_count_pearson_r{}_{}" .format(suffix, sample_id)] = r
-            pearson_vals.append(r)
-    if pearson_vals:
-        metrics["junction_count_pearson_r{}_mean".format(suffix)] = float(np.mean(pearson_vals))
+        scores = table["pred_count"].combine_chunks().to_numpy(
+            zero_copy_only=False
+        ).astype(np.float32, copy=False)
+        observed = table["obs_count"].combine_chunks().to_numpy(
+            zero_copy_only=False
+        )
+        raw = table[raw_column].combine_chunks().to_numpy(
+            zero_copy_only=False
+        )
+        n_total = int(totals.get(sample_id, len(scores)))
 
+        for suffix, min_count in variants:
+            if min_count is None:
+                selected_scores = scores
+                selected_observed = observed
+            else:
+                keep = (raw == 0) | (raw >= min_count)
+                selected_scores = scores[keep]
+                selected_observed = observed[keep]
+
+            is_positive = selected_observed > 0
+            n_synthetic = max(0, n_total - len(selected_scores))
+            ap = _average_precision_with_synthetic_zero_negatives(
+                selected_scores, is_positive, n_synthetic
+            )
+            if ap is not None:
+                metrics["junction_auprc{}_{}".format(suffix, sample_id)] = ap
+                auprc_values[suffix].append(ap)
+
+            if int(is_positive.sum()) >= 3:
+                r = safe_pearson(
+                    np.log1p(selected_scores[is_positive]),
+                    np.log1p(selected_observed[is_positive]),
+                )
+                if r is not None:
+                    metrics[
+                        "junction_count_pearson_r{}_{}".format(suffix, sample_id)
+                    ] = r
+                    pearson_values[suffix].append(r)
+            if min_count is not None:
+                print(
+                    "  {} {}>= {}: {:,} retained rows, {:,} positives".format(
+                        sample_id, raw_column, min_count,
+                        len(selected_scores), int(is_positive.sum()),
+                    )
+                )
+
+        del table, scores, observed, raw
+        gc.collect()
+
+    for suffix, _ in variants:
+        if auprc_values[suffix]:
+            metrics["junction_auprc{}_mean".format(suffix)] = float(
+                np.mean(auprc_values[suffix])
+            )
+        if pearson_values[suffix]:
+            metrics["junction_count_pearson_r{}_mean".format(suffix)] = float(
+                np.mean(pearson_values[suffix])
+            )
     return metrics
 
 
@@ -441,7 +534,11 @@ def main() -> None:
     rna_df  = _load("rna_seq_per_gene.parquet")
     cls_df  = _load("splice_site_scores.parquet")
     ssu_df  = _load("ssu_scores.parquet")
-    junc_df = _load("junction_scores.parquet")
+    junc_path = os.path.join(pred_dir, "junction_scores.parquet")
+    junc_rows = (
+        pq.ParquetFile(junc_path).metadata.num_rows
+        if os.path.exists(junc_path) else 0
+    )
     totals_df = _load("junction_totals.parquet")
     psi_df    = _load("psi_scores.parquet")
     profile_shape_df  = _load("rna_seq_profile_metrics_per_interval.parquet")
@@ -450,7 +547,7 @@ def main() -> None:
     print("  rna_seq rows: {}".format(len(rna_df)))
     print("  splice_site rows: {}".format(len(cls_df)))
     print("  ssu rows: {}".format(len(ssu_df)))
-    print("  junction rows: {}".format(len(junc_df)))
+    print("  junction rows: {} (streamed from parquet)".format(junc_rows))
     print("  psi rows: {}".format(len(psi_df)))
     print("  profile-shape rows: {}".format(len(profile_shape_df)))
     print("  track-totals rows: {}".format(len(track_totals_df)))
@@ -474,20 +571,10 @@ def main() -> None:
         all_metrics.update(compute_ssu_metrics(ssu_df_filtered, suffix=suffix))
 
     print("Computing junction metrics...")
-    all_metrics.update(compute_junction_metrics(junc_df, totals_df))
-    raw_col = "obs_count_raw" if "obs_count_raw" in junc_df.columns else "obs_count"
-    for min_count in (args.min_junction_counts or []):
-        if min_count > 1 and raw_col in junc_df.columns:
-            # Keep negatives (raw==0) and high-confidence positives (raw >= min_count);
-            # exclude noisy singletons (0 < raw < min_count) from the positive set.
-            junc_filtered = junc_df[(junc_df[raw_col] == 0) | (junc_df[raw_col] >= min_count)]
-            suffix = "_mincount{}".format(min_count)
-            print("  also computing junction metrics with {}>= {} ({:,} / {:,} positives)".format(
-                raw_col, min_count,
-                (junc_filtered["obs_count"] > 0).sum(),
-                (junc_df["obs_count"] > 0).sum(),
-            ))
-            all_metrics.update(compute_junction_metrics(junc_filtered, totals_df, suffix=suffix))
+    if junc_rows:
+        all_metrics.update(compute_junction_metrics_from_parquet(
+            junc_path, totals_df, args.min_junction_counts or []
+        ))
 
     print("Computing PSI Pearson r...")
     all_metrics.update(compute_psi_metrics(psi_df))

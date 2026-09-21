@@ -5,17 +5,56 @@ FOLD_1 test set.
 Mirrors workflows/06-evaluation/Snakefile (same collect_predictions.py /
 compute_eval_metrics.py, same conda env, same GPU resources) but sources
 checkpoints from xinming's results package instead of this repo's own local
-finetuning output — xinming continued the same two runs (probing, LoRA) on
-their own cluster:
-  results/xinming/alphagenome_finetuning_downstream_2026-08-31/checkpoints/pytorch/
-    probing_epoch10/checkpoint_epoch10.pth        -- complete, 10 epochs
-    lora_epoch7_PARTIAL/checkpoint_epoch7.pth      -- partial, 7 of 10 epochs
+finetuning output.
 
-collect_predictions.py's load_finetuned_model() requires a config.json next
-to the checkpoint file (mode/lora_rank/lora_alpha/lora_targets); xinming's
-checkpoint dirs don't have one, but the same config exists separately under
-metadata/runs/{pytorch_probing,pytorch_lora_PARTIAL}/config.json -- rule
-stage_checkpoint_config symlinks it into place.
+Package: results/xinming/20260918/ (corrected, complete 10-epoch rerun of
+both runs after a junction/DDP correctness fix -- supersedes the older
+2026-08-31 package, whose LoRA run only reached epoch 7/10):
+  runs/pytorch_corrected/probing/checkpoint_epoch10.delta.pth
+  runs/pytorch_corrected/lora/checkpoint_epoch10.delta.pth
+Both checkpoints are *deltas* (sparse adapter/head/norm tensors over the
+pretrained trunk), not full state-dicts, and each has its own config.json
+sitting right next to it -- unlike the older package, no staging/symlinking
+of a separately-filed config.json is needed here.
+
+collect_predictions.py auto-detects delta vs. full checkpoints (looks for
+"delta_checkpoint_version" in the loaded file) and dispatches to
+load_delta_checkpoint(verify_hash=True, strict=True) accordingly, so this
+workflow needs no separate code path from workflow 06.
+
+Precision: each run's own config.json records the dtype it was actually
+trained under (e.g. "bfloat16") -- this workflow reads that per run rather
+than hardcoding a --dtype default, since a checkpoint trained elsewhere is
+not guaranteed to match this repo's own training precision.
+
+Batching: collect_predictions.py supports --batch-size > 1 (every interval is
+padded/cropped to the same --sequence-length, so batching is a plain stack
+along a new batch dim with no cross-example padding/masking to get wrong).
+
+IMPORTANT -- measured on this workflow's actual GPU (a ~93GB H100 NVL, gres
+gpu:h100:1), NOT the naive "more VRAM -> proportionally bigger batch" guess:
+  - batch_size=1: baseline.
+  - batch_size=2: fits (~76/93GB used) and collect_predictions.py's other
+    four outputs (rna_seq, splice_site, ssu, psi) matched batch=1 essentially
+    exactly on an 8-interval check; junction_scores.parquet's pred_count
+    differed for ~0.1% of (interval, sample, donor, acceptor) triples, by up
+    to ~7% relative on individual pairs (ordinary bf16 batched-matmul
+    reduction-order noise feeding a sharp junction-count head, not a
+    cross-example leak -- interval_idx/row order were identical).
+  - batch_size=3-4: genuine CUDA OOM on this ~93GB card (per-interval
+    activation memory at this 1,048,576 bp sequence length is enormous, not
+    metadata/weights) -- nowhere near the "40GB->4" a memory-only heuristic
+    would suggest.
+  - batch_size=8: does not even reach OOM -- a max_pool1d CUDA kernel in the
+    trunk's stem overflows 32-bit indexing at this (batch, channels,
+    sequence_length) product ("RuntimeError: integer out of range").
+So there is no GPU tier on which "40GB -> 4" or "80GB -> 8" holds for this
+model at this sequence length; EVAL_BATCH_SIZE=1 below is the conservative
+default given the measured (if small) junction-count noise at batch_size=2.
+If you want the ~2x speedup for a less metric-critical subset (e.g.
+train_sample), re-run src/scripts/check_batch_parity.py against the actual
+checkpoint you care about first and set EVAL_BATCH_SIZE=2 deliberately --
+never try batch_size >= 3 at this sequence length on this GPU class.
 
 Subsets:
   test          -- held-out test intervals (6,359 intervals)
@@ -34,13 +73,15 @@ run via SLURM rather than on the login node:
         'snakemake --cluster "sbatch --cpus-per-task={threads} --mem={resources.memory}G --time={resources.runtime} --partition={resources.partition} --gres={resources.gres} --parsable" --cluster-status src/scripts/status-sacct.sh --jobs 4 --use-conda -s workflows/11-xinming_pytorch_evaluation/Snakefile --latency-wait 60 --rerun-incomplete --keep-going --rerun-triggers mtime'
 """
 
+import itertools
+import json
 import os
 
 configfile: "config/config.yaml"
 
 DATA_DIR       = config["rnaseq"]["sf3b1mut"]["path"]
-XINMING_DIR    = "results/xinming/alphagenome_finetuning_downstream_2026-08-31"
-XINMING_CKPT_DIR = os.path.join(XINMING_DIR, "checkpoints", "pytorch")
+XINMING_DIR    = "results/xinming/20260918"
+XINMING_CKPT_DIR = os.path.join(XINMING_DIR, "runs", "pytorch_corrected")
 OUTPUT_DIR     = "results/evaluation/alphagenome_pytorch_xinming/full"
 FOLDS_DIR      = config["finetuning"]["alphagenome"]["folds_dir"]
 FOLD           = config["preprocessing"]["overfitting"]["fold"]
@@ -50,26 +91,54 @@ BIGWIG_STRANDS = ["forward", "reverse"]
 COLLECT_SCRIPT = "src/scripts/collect_predictions.py"
 METRICS_SCRIPT = "src/scripts/compute_eval_metrics.py"
 
-EVAL_SUBSETS = ["test", "train_sample"]
+# Conservative default -- see module docstring for the measured (not assumed)
+# batch-size limits on this workflow's GPU: batch_size=2 fits and mostly
+# matches batch=1 but with measurable junction-count noise on a small
+# fraction of pairs; batch_size>=3 OOMs or overflows outright at this
+# sequence length. Change deliberately, not from a generic memory heuristic.
+EVAL_BATCH_SIZE = 1
+
+# Job-level (not tensor-level) parallelism: run all 4 collect_predictions
+# jobs concurrently, each pinned to a DIFFERENT physical GPU, instead of
+# letting them queue behind gpu_diasfrazer's single H100. Measured on this
+# cluster (bf16, batch_size=1, this checkpoint/sequence-length): needs
+# ~24GB+ -- fits the H100, the 7g.80gb slice, and both 3g.40gb slices; does
+# NOT fit a 1g.24gb slice (OOM'd at ~21.6GB total capacity) or anything
+# smaller (RTX 2080 Ti 11GB, A4000 16GB). That leaves exactly 4 usable GPUs
+# cluster-wide for this workload, one per job below.
+# Consumed in itertools.product(XINMING_PT_RUNS, EVAL_SUBSETS) order. With
+# EVAL_SUBSETS = ["test"] that is just [0]=(probing, test), [1]=(lora, test),
+# so the first two entries are the two 3g.40gb slices: the reported test-set
+# runs then never queue behind the H100 / 7g.80gb, which workflow 10's JAX
+# evaluation occupies for hours at a time. 40GB is ample -- bf16
+# batch_size=1 measured at ~24GB+ for this model at this sequence length.
+# Slots [2]/[3] only come into play if train_sample is re-enabled above.
+GPU_POOL = [
+    {"partition": "gpu",            "gres": "gpu:3g.40gb:1"},
+    {"partition": "gpu",            "gres": "gpu:3g.40gb:1"},
+    {"partition": "gpu_diasfrazer", "gres": "gpu:h100:1"},
+    {"partition": "gpu",            "gres": "gpu:7g.80gb:1"},
+]
+
+EVAL_SUBSETS = ["test"]#, "train_sample"]
 
 SUBSET_BED = {
     "test":         os.path.join(FOLDS_DIR, FOLD, "test.bed"),
-    "train_sample": os.path.join(FOLDS_DIR, FOLD, "train_sample.bed"),
+    # "train_sample": os.path.join(FOLDS_DIR, FOLD, "train_sample.bed"),
 }
 
-# run_name -> where xinming's checkpoint for it lives + which epoch it is +
-# which metadata/runs/ subdir holds its config.json (config.json isn't
-# colocated with the checkpoint in xinming's package -- see module docstring).
+# run_name -> which checkpoint subdir under XINMING_CKPT_DIR holds it + which
+# epoch it is. Both runs are complete 10-epoch reruns; config.json for each
+# lives alongside its checkpoint (no separate staging needed, unlike the
+# older xinming package this workflow previously targeted).
 XINMING_PT_RUNS = {
     "randinit__newloss__annotated__frozen__multigpu_ddp": {
-        "checkpoint_subdir": "probing_epoch10",
+        "checkpoint_subdir": "probing",
         "epoch": 10,
-        "config_source": "pytorch_probing",
     },
     "randinit__newloss__annotated__lora__largegpu__nowarmup": {
-        "checkpoint_subdir": "lora_epoch7_PARTIAL",
-        "epoch": 7,
-        "config_source": "pytorch_lora_PARTIAL",
+        "checkpoint_subdir": "lora",
+        "epoch": 10,
     },
 }
 
@@ -80,6 +149,21 @@ XINMING_PT_RUNS = {
 _RUN_NAMES = [r for r in XINMING_PT_RUNS for s in EVAL_SUBSETS]
 _EPOCHS    = [cfg["epoch"] for r, cfg in XINMING_PT_RUNS.items() for s in EVAL_SUBSETS]
 _SUBSETS   = [s for r in XINMING_PT_RUNS for s in EVAL_SUBSETS]
+
+# (run_name, subset) -> one GPU_POOL entry, one-to-one -- exactly 4 jobs onto
+# exactly 4 usable GPUs, so all 4 collect_predictions jobs can run at once.
+_GPU_ASSIGNMENT = dict(zip(
+    itertools.product(XINMING_PT_RUNS.keys(), EVAL_SUBSETS),
+    GPU_POOL,
+))
+
+
+def _gpu_partition(wildcards):
+    return _GPU_ASSIGNMENT[(wildcards.run_name, wildcards.subset)]["partition"]
+
+
+def _gpu_gres(wildcards):
+    return _GPU_ASSIGNMENT[(wildcards.run_name, wildcards.subset)]["gres"]
 
 
 # ---------------------------------------------------------------------------
@@ -120,35 +204,27 @@ def _checkpoint_dir(wildcards):
 def _checkpoint_path(wildcards):
     cfg = XINMING_PT_RUNS[wildcards.run_name]
     return os.path.join(XINMING_CKPT_DIR, cfg["checkpoint_subdir"],
-                         "checkpoint_epoch{}.pth".format(cfg["epoch"]))
+                         "checkpoint_epoch{}.delta.pth".format(cfg["epoch"]))
 
 
-def _staged_config_path(wildcards):
+def _config_path(wildcards):
     return os.path.join(_checkpoint_dir(wildcards), "config.json")
 
 
-def _staged_config_path_for(run_name):
-    cfg = XINMING_PT_RUNS[run_name]
-    return os.path.join(XINMING_CKPT_DIR, cfg["checkpoint_subdir"], "config.json")
-
-
-def _config_source_path_for(run_name):
-    cfg = XINMING_PT_RUNS[run_name]
-    return os.path.join(XINMING_DIR, "metadata", "runs", cfg["config_source"], "config.json")
+def _run_dtype(wildcards):
+    """Read the checkpoint's own training dtype from its config.json, rather
+    than hardcoding a --dtype default -- xinming's runs aren't guaranteed to
+    have been trained identically to this repo's own local runs."""
+    with open(_config_path(wildcards)) as f:
+        run_config = json.load(f)
+    return run_config.get("dtype", "bfloat16")
 
 
 # ---------------------------------------------------------------------------
 # Rules
 # ---------------------------------------------------------------------------
 
-# Trivial symlink operations -- run directly on the submitting node instead
-# of going through the --cluster sbatch template (which references
-# {resources.memory}/{resources.partition}/{resources.gres}; these rules
-# declare no resources: block since they need none, so submitting them to
-# the cluster crashes the template formatting).
 include: "rules/paper.smk"
-
-localrules: stage_checkpoint_config_probing, stage_checkpoint_config_lora
 
 
 rule all:
@@ -163,39 +239,15 @@ rule all:
         PAPER_JAX_TARGETS,
 
 
-rule stage_checkpoint_config_probing:
-    """Symlink the probing run's config.json (filed separately under
-    metadata/runs/ in xinming's package) next to its checkpoint file, where
-    collect_predictions.py's load_finetuned_model() expects to find it.
-    (Snakemake requires output: to be a static path, not a function -- with
-    only two runs, two concrete rules beat a wildcard-generic one here.)"""
-    input:
-        config = _config_source_path_for("randinit__newloss__annotated__frozen__multigpu_ddp"),
-    output:
-        config = _staged_config_path_for("randinit__newloss__annotated__frozen__multigpu_ddp"),
-    run:
-        os.symlink(os.path.abspath(input.config), output.config)
-
-
-rule stage_checkpoint_config_lora:
-    """Same as stage_checkpoint_config_probing, for the LoRA run."""
-    input:
-        config = _config_source_path_for("randinit__newloss__annotated__lora__largegpu__nowarmup"),
-    output:
-        config = _staged_config_path_for("randinit__newloss__annotated__lora__largegpu__nowarmup"),
-    run:
-        os.symlink(os.path.abspath(input.config), output.config)
-
-
 rule collect_predictions:
-    """Single-GPU inference on interval BED -- writes prediction parquets."""
+    """Batched GPU inference on interval BED -- writes prediction parquets."""
     wildcard_constraints:
         run_name = "|".join(XINMING_PT_RUNS.keys()),
         epoch    = r"\d+",
         subset   = r"[a-z_]+",
     input:
         checkpoint       = _checkpoint_path,
-        staged_config    = _staged_config_path,
+        run_config       = _config_path,
         pretrained       = config["alphagenome_pytorch"]["paths"]["weights"],
         interval_bed     = _interval_bed,
         genome           = config["gencode"]["paths"]["fasta"],
@@ -214,13 +266,15 @@ rule collect_predictions:
         output_dir      = lambda wildcards: os.path.join(OUTPUT_DIR, wildcards.run_name, "epoch{}".format(wildcards.epoch), wildcards.subset, "predictions"),
         samples         = " ".join(SAMPLES),
         sequence_length = config["finetuning"]["alphagenome"]["sf3b1mut"]["sequence_length"],
+        dtype           = _run_dtype,
+        batch_size      = EVAL_BATCH_SIZE,
     benchmark:
         os.path.join(OUTPUT_DIR, "benchmarks", "{run_name}", "epoch{epoch}", "{subset}", "collect_predictions.tsv")
     threads: 20
     resources:
         runtime   = int(12 * 60),
-        partition = "gpu_diasfrazer",
-        gres      = "gpu:h100:1",
+        partition = _gpu_partition,
+        gres      = _gpu_gres,
         memory    = 128,
     conda:
         "alphagenome_pytorch"
@@ -239,7 +293,8 @@ rule collect_predictions:
             --star-junctions {input.star_junctions} \
             --samples {params.samples} \
             --sequence-length {params.sequence_length} \
-            --dtype bfloat16 \
+            --dtype {params.dtype} \
+            --batch-size {params.batch_size} \
             --output-dir {params.output_dir}
 
         echo "Done collecting predictions for {wildcards.run_name} epoch {wildcards.epoch} subset {wildcards.subset}"
