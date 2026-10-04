@@ -6,13 +6,20 @@ finetuning.borzoi.evaluation, one directory per replicate under
 results/finetuning/borzoi/trunk_r{0..3}) fine-tuned on the SF3B1 RNA-seq
 tracks (2 samples x 2 strands).
 
-Two steps per subset, mirroring workflows/06-evaluation and
+Steps per subset, mirroring workflows/06-evaluation and
 workflows/10-jax_finetuning so metrics can be recomputed without repeating
 inference:
   1. collect_predictions_borzoi -- GPU inference per trunk, untransform
                                     (soft clip / sqrt / scale), mean over trunks
-  2. compute_metrics_borzoi     -- CPU: profile + gene-expression metrics at
-                                    1 bp (native bin repeated) and 32 bp
+  2. export_alphagenome_format  -- CPU: write the AlphaGenome-schema RNA-seq
+                                    parquets (same helper definitions)
+  3. compute_eval_metrics       -- CPU: src/scripts/compute_eval_metrics.py,
+                                    unchanged, so metrics.parquet is directly
+                                    comparable to the AlphaGenome runs
+Optional (not in `rule all`): compute_metrics_borzoi computes the upstream
+profile + gene-expression metrics at 1 bp and 32 bp from the raw predictions
+(summary.json; needs ~512 GB). Request it explicitly:
+    results/evaluation/borzoi/full/{subset}/summary.json
 
 The model and metric code is the unmodified upstream evaluation script
 (scripts/upstream/, abuendia/alphagenome-pytorch, branch abuen/borzoi-eval).
@@ -23,7 +30,8 @@ Subsets:
 
 Outputs:
   results/evaluation/borzoi/full/{subset}/predictions/{predictions_32bp.npy,regions.parquet,run_info.json}
-  results/evaluation/borzoi/full/{subset}/summary.json (+ per-region / per-gene CSVs)
+  results/evaluation/borzoi/full/{subset}/predictions/*.parquet (AlphaGenome schema)
+  results/evaluation/borzoi/full/{subset}/metrics.parquet, metrics.json
 
 Run with:
     snakemake -s workflows/12-borzoi_evaluation/Snakefile --use-conda [-n]

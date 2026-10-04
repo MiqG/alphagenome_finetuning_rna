@@ -80,3 +80,22 @@ Compared:
 - Number of shared regions after intersecting, and number of shared genes.
 - Borzoi: predicted vs observed total ratio should be about 1. This confirms the untransform
   `scale` (a wrong scale, e.g. 0.005 vs 0.3, is a 60x error).
+
+## Implemented on the Borzoi side (workflow 12)
+
+`workflows/12-borzoi_evaluation/scripts/export_alphagenome_format.py` writes the AlphaGenome
+RNA-seq prediction parquets from the raw Borzoi predictions, importing the helper functions from
+`src/scripts/collect_predictions.py`, and `src/scripts/compute_eval_metrics.py` then runs unchanged.
+Checked on 20 regions against the upstream Borzoi evaluation: gene values at 1 bp identical (1e-15),
+accumulated central 1 bp Pearson identical (1e-9), same columns and dtypes as a real AlphaGenome run.
+
+Conventions used on the Borzoi side (these already follow the AlphaGenome conventions, so items 2 and 3
+above only need changes on the AlphaGenome side for the gene window and the region intersection):
+- the central 196,608 bp window plays the role of the whole window (gene assignment and exon means);
+  "full" scope outputs are NaN or empty;
+- 1 bp = bin sum / 32 repeated; 32 bp = per-base mean in the bin (AlphaGenome's mean pooling), so the
+  32 bp log1p profile is log1p(mean) on both sides;
+- `interval_idx` and start/end are those of the BED interval.
+
+Still open on the AlphaGenome side: gene assignment and exon means over the central window
+(item 1), and intersecting regions (item 4).
