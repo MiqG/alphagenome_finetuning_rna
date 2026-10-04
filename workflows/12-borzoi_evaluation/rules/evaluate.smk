@@ -76,6 +76,10 @@ EXPORT_FILES = [
     "rna_seq_profile_corr_per_interval.parquet",
     "rna_seq_profile_metrics_per_interval.parquet",
     "rna_seq_track_totals_per_interval.parquet",
+    # 32 bp view with native bin-sum pooling (the *_32bp files above are mean-pooled).
+    "rna_seq_profile_corr_exon_32bp_sum.parquet",
+    "rna_seq_profile_corr_central_32bp_sum.parquet",
+    "rna_seq_profile_corr_per_interval_32bp_sum.parquet",
 ]
 
 EVAL_TARGETS = expand(

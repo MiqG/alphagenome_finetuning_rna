@@ -101,3 +101,33 @@ above only need changes on the AlphaGenome side for the gene window and the regi
 
 Still open on the AlphaGenome side: gene assignment and exon means over the central window
 (item 1), and intersecting regions (item 4).
+
+## Native resolution (Borzoi outputs 32 bp bins)
+
+Borzoi's native view is 32 bp bin sums; its "1 bp" view is the bin repeated 32x and carries no within-bin
+information, so 1 bp comparisons build in a resolution gap (AlphaGenome resolves exon boundaries). The fair
+comparison is at 32 bp, with AlphaGenome pooled down to Borzoi's bins (bin edges coincide: the central window
+starts 13,312 x 32 bp into the 1 Mb interval).
+
+Borzoi runs report the 32 bp view both ways, in the same parquets (AlphaGenome is not changed):
+- `*_32bp.parquet`: mean-pooled (per-base mean in the bin, log1p(mean)), the AlphaGenome convention, comparable
+  with the existing AlphaGenome results.
+- `rna_seq_profile_corr_{exon,central}_32bp_sum.parquet` and `rna_seq_profile_corr_per_interval_32bp_sum.parquet`:
+  the native bin sums (log1p(sum)). Only the log1p-based profile correlations depend on this; raw Pearson and JS
+  do not. Checked against the upstream Borzoi evaluation: accumulated central 32 bp Pearson identical (1e-9).
+- 32 bp gene means (`rna_seq_per_gene_32bp.parquet`) weight each bin by its exon base count and use the weighted
+  bins for both prediction and observation, as the upstream Borzoi evaluation does (identical to 1e-16). AlphaGenome's
+  own 32 bp table counts every bin an exon touches equally and uses the 1 bp observation, so this table differs
+  slightly in definition from the AlphaGenome one (same columns and dtypes).
+
+What AlphaGenome has at 32 bp today: the 32 bp parquets are collected, and workflow 09 summarises gene expression
+and per-track profile Pearson (per interval and accumulated, central) at 1 bp and 32 bp, restricted to genes shared
+by all models. Not available at 32 bp for AlphaGenome: pooled raw profile r, JSD, MSE (1 bp central only), and
+anything in the sum convention.
+
+Gene metrics without re-running AlphaGenome: AlphaGenome assigns genes and takes exon means over the 1 Mb window.
+For comparison, keep genes present in all models (workflow 09 does this) and, additionally, genes whose exons lie
+entirely inside a Borzoi central window, so exon base sets are identical. Caveat: AlphaGenome's prediction for a gene
+comes from the first qualifying interval, possibly a different context window than Borzoi's.
+The across-tracks-by-gene gene correlation is degenerate with 2 tracks (centred values (x, -x) give +-1);
+compute_eval_metrics.py already drops it for fewer than 3 tracks.

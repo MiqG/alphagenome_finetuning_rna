@@ -11,6 +11,8 @@ unchanged src/scripts/compute_eval_metrics.py works on Borzoi runs too:
   rna_seq_per_gene.parquet / rna_seq_per_gene_32bp.parquet
   rna_seq_profile_corr_{exon,full,central}_{1bp,32bp}.parquet
   rna_seq_profile_corr_per_interval.parquet
+  rna_seq_profile_corr_{exon,central}_32bp_sum.parquet          (bin-sum variants)
+  rna_seq_profile_corr_per_interval_32bp_sum.parquet
   rna_seq_profile_metrics_per_interval.parquet
   rna_seq_track_totals_per_interval.parquet
 
@@ -23,8 +25,17 @@ Conventions that follow from Borzoi:
   - Borzoi only predicts the central 196,608 bp of each BED interval, so that
     window plays the role of the whole window: genes are assigned (>=50% exon bp)
     and exon means are taken inside it. "full"-scope outputs are NaN / empty.
-  - 1 bp prediction = native bin sum / 32 repeated 32x; 32 bp prediction = mean
-    per base in the bin (AlphaGenome's mean-pooled convention).
+  - Borzoi's native resolution is 32 bp (bin sums). The 1 bp prediction is the
+    bin repeated 32x (per-base value = bin sum / 32): it carries no within-bin
+    information, so 32 bp is the resolution-matched view.
+  - The 32 bp view is reported both ways. The *_32bp parquets use mean pooling
+    (per-base mean in the bin, AlphaGenome's convention, log1p(mean)); the
+    *_32bp_sum parquets use the native bin sums (log1p(sum)). Only the
+    log1p-based profile correlations depend on this choice.
+  - 32 bp gene means (rna_seq_per_gene_32bp) weight each bin by its number of
+    exon bases (exact exon-base weighting, as in the upstream Borzoi evaluation),
+    for both prediction and observation; AlphaGenome's own 32 bp table counts
+    every bin an exon touches equally and uses the 1 bp observation.
   - interval_idx and start/end are those of the BED interval (not the target
     window), so tables join with the AlphaGenome ones.
 
@@ -78,7 +89,6 @@ from rna_eval_helpers import (  # noqa: E402
     fetch_obs_window,
     get_exon_mean_obs,
     get_exon_mean_pred,
-    get_exon_mean_pred_binned,
     jsd_per_track,
     merge_gene_exons,
     pearson_r_per_track,
@@ -121,6 +131,30 @@ def _write_parquet(df: pd.DataFrame, path: str) -> None:
     tmp = path + ".tmp"
     df.to_parquet(tmp, index=False, compression="zstd")
     os.replace(tmp, path)
+
+
+def exon_weighted_bin_mean(
+    values_32: np.ndarray,
+    exon_rows: pd.DataFrame,
+    window_start: int,
+    seq_len: int,
+) -> np.ndarray | None:
+    """Mean over exon bases of 32 bp bin values, each bin weighted by its exon base count.
+
+    values_32: (n_bins, n_tracks) per-base values of each bin. exon_rows are the
+    gene's merged (non-overlapping) exons, 0-based half-open.
+    """
+    mask = np.zeros(seq_len, dtype=bool)
+    for start, end in zip(exon_rows["Start"], exon_rows["End"]):
+        rel_s = max(0, int(start) - window_start)
+        rel_e = min(seq_len, int(end) - window_start)
+        if rel_e > rel_s:
+            mask[rel_s:rel_e] = True
+    weights = mask.reshape(-1, POOL).sum(axis=1)
+    total = weights.sum()
+    if total == 0:
+        return None
+    return (weights[:, None] * values_32).sum(axis=0) / total
 
 
 def write_alphagenome_parquets(
@@ -175,8 +209,10 @@ def write_alphagenome_parquets(
     acc = {name: ProfileCorrAccumulator(n_tracks) for name in (
         "exon_1bp", "full_1bp", "exon_32bp", "full_32bp", "central_1bp", "central_32bp",
     )}
+    acc["central_32bp_sum"] = ProfileCorrAccumulator(n_tracks)
+    acc["exon_32bp_sum"] = ProfileCorrAccumulator(n_tracks)
     rna_rows, rna_rows_32bp = [], []
-    interval_corr_rows, pooled_rows, totals_rows = [], [], []
+    interval_corr_rows, interval_corr_sum_rows, pooled_rows, totals_rows = [], [], [], []
 
     for pos in range(n_regions):
         region = regions.iloc[pos]
@@ -196,6 +232,10 @@ def write_alphagenome_parquets(
         acc["central_32bp"].update(log_p32, log_o32)
         r_1bp = pearson_r_per_track(log_p1, log_o1)
         r_32bp = pearson_r_per_track(log_p32, log_o32)
+        # Native bin-sum view of the 32 bp profile (log1p of the sum, not the mean).
+        log_p32s, log_o32s = np.log1p(pred_32 * POOL), np.log1p(obs_32 * POOL)
+        acc["central_32bp_sum"].update(log_p32s, log_o32s)
+        r_32bp_sum = pearson_r_per_track(log_p32s, log_o32s)
 
         profile_r_track = pearson_r_per_track(pred_1, obs_1)
         jsd_track = jsd_per_track(pred_1, obs_1)
@@ -224,6 +264,12 @@ def write_alphagenome_parquets(
                 "profile_pearson_r_raw_central": float(profile_r_track[t_idx]),
                 "jsd_full": float("nan"), "jsd_central": float(jsd_track[t_idx]),
             })
+            interval_corr_sum_rows.append({
+                "interval_idx": iv_idx, "chrom": chrom, "start": iv_start, "end": iv_end,
+                "track_idx": t_idx, "track_name": track_name, "strand": strand,
+                "pearson_r_central_32bp": float(r_32bp_sum[t_idx]),
+                "n_positions_central_32bp": n_bins,
+            })
             totals_rows.append({
                 "interval_idx": iv_idx, "chrom": chrom, "track_idx": t_idx,
                 "track_name": track_name, "strand": strand,
@@ -239,7 +285,8 @@ def write_alphagenome_parquets(
             _, g_strand, g_name = gene_interval_map[gid]
             track_indices = forward_track_indices if g_strand == "+" else reverse_track_indices
             pred_means = get_exon_mean_pred(pred_1, gene_exons, win_start, seq_len)
-            pred_means_32 = get_exon_mean_pred_binned(pred_32, gene_exons, win_start, seq_len)
+            pred_means_32 = exon_weighted_bin_mean(pred_32, gene_exons, win_start, seq_len)
+            obs_means_32 = exon_weighted_bin_mean(obs_32, gene_exons, win_start, seq_len)
             obs_means = get_exon_mean_obs(bigwigs, gene_exons, chrom, chrom_sizes, win_start, seq_len)
             if pred_means is None or obs_means is None:
                 continue
@@ -253,6 +300,7 @@ def write_alphagenome_parquets(
                 bin_e = min(((rel_e - 1) // POOL) + 1, n_bins)
                 if bin_e > bin_s:
                     acc["exon_32bp"].update(log_p32[bin_s:bin_e], log_o32[bin_s:bin_e])
+                    acc["exon_32bp_sum"].update(log_p32s[bin_s:bin_e], log_o32s[bin_s:bin_e])
             for t_idx in track_indices:
                 row = {
                     "gene_id": gid, "gene_name": g_name, "chrom": chrom, "strand": g_strand,
@@ -261,8 +309,12 @@ def write_alphagenome_parquets(
                     "obs_log_mean": float(np.log1p(obs_means[t_idx])),
                 }
                 rna_rows.append({**row, "pred_log_mean": float(np.log1p(pred_means[t_idx]))})
-                if pred_means_32 is not None:
-                    rna_rows_32bp.append({**row, "pred_log_mean": float(np.log1p(pred_means_32[t_idx]))})
+                if pred_means_32 is not None and obs_means_32 is not None:
+                    rna_rows_32bp.append({
+                        **row,
+                        "obs_log_mean": float(np.log1p(obs_means_32[t_idx])),
+                        "pred_log_mean": float(np.log1p(pred_means_32[t_idx])),
+                    })
         if (pos + 1) % 500 == 0:
             log.info("  region %d/%d", pos + 1, n_regions)
 
@@ -278,6 +330,8 @@ def write_alphagenome_parquets(
         )
     _write_parquet(pd.DataFrame(interval_corr_rows),
                    os.path.join(output_dir, "rna_seq_profile_corr_per_interval.parquet"))
+    _write_parquet(pd.DataFrame(interval_corr_sum_rows),
+                   os.path.join(output_dir, "rna_seq_profile_corr_per_interval_32bp_sum.parquet"))
     _write_parquet(pd.DataFrame(pooled_rows),
                    os.path.join(output_dir, "rna_seq_profile_metrics_per_interval.parquet"))
     _write_parquet(pd.DataFrame(totals_rows),
