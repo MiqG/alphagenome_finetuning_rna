@@ -15,7 +15,7 @@ inference:
                                     1 bp (native bin repeated) and 32 bp
 
 The model and metric code is the unmodified upstream evaluation script
-(src/borzoi_eval/, abuendia/alphagenome-pytorch, branch abuen/borzoi-eval).
+(scripts/upstream/, abuendia/alphagenome-pytorch, branch abuen/borzoi-eval).
 
 Subsets:
   test          -- held-out test intervals

@@ -12,7 +12,7 @@ bigwigs, and computes, at 1 bp (native bin repeated) and 32 bp resolution:
   - AlphaGenome-paper gene expression metrics (RNA only)
 
 The metric functions are imported from the vendored, unmodified upstream
-script (src/borzoi_eval/evaluate_borzoi_checkpoint.py); the code below only
+script (upstream/evaluate_borzoi_checkpoint.py); the code below only
 reassembles the tail of that script's main() so that, for identical
 predictions, the outputs are identical to a one-step upstream evaluation.
 It needs no GPU.
@@ -24,7 +24,7 @@ Outputs (in --output-dir):
   gene_expression_metrics_per_track.csv, gene_expression_metrics_per_gene.csv
 
 Usage:
-    python src/scripts/compute_metrics_borzoi.py \\
+    python workflows/12-borzoi_evaluation/scripts/compute_metrics_borzoi.py \\
         --predictions-dir results/evaluation/borzoi/full/test/predictions \\
         --bigwig s1_fwd.bw s1_rev.bw s2_fwd.bw s2_rev.bw \\
         --samples SRR17111303 SRR17111311 \\
@@ -46,7 +46,7 @@ import numpy as np
 import pandas as pd
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(os.path.dirname(HERE), "borzoi_eval"))
+sys.path.insert(0, os.path.join(HERE, "upstream"))
 
 import evaluate_borzoi_checkpoint as ebc  # noqa: E402
 from compute_gene_metrics import (  # noqa: E402

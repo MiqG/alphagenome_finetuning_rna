@@ -21,8 +21,10 @@ NUM_REPS       = BORZOI_EVAL["num_reps"]
 TARGETS_FILE   = BORZOI_EVAL["targets"]
 EVAL_OUTPUT_DIR = BORZOI_EVAL["output_dir"]
 
-COLLECT_SCRIPT = "src/scripts/collect_predictions_borzoi.py"
-METRICS_SCRIPT = "src/scripts/compute_metrics_borzoi.py"
+# Repo-root-relative (see workflows/10-jax_finetuning/rules/finetune.smk for why).
+SCRIPTS_DIR    = "workflows/12-borzoi_evaluation/scripts"
+COLLECT_SCRIPT = os.path.join(SCRIPTS_DIR, "collect_predictions_borzoi.py")
+METRICS_SCRIPT = os.path.join(SCRIPTS_DIR, "compute_metrics_borzoi.py")
 
 # Subsets to evaluate: test (held-out) + train_sample (overfitting check)
 EVAL_SUBSETS = ["test", "train_sample"]

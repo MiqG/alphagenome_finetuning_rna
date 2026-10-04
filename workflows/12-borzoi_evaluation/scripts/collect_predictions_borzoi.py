@@ -9,7 +9,7 @@ Metrics are computed separately by compute_metrics_borzoi.py, so different
 metrics can be tried without repeating inference.
 
 All model/target logic is imported from the vendored, unmodified upstream
-script (src/borzoi_eval/evaluate_borzoi_checkpoint.py), so predictions are
+script (upstream/evaluate_borzoi_checkpoint.py), so predictions are
 identical to what that script's own evaluation would produce.
 
 Outputs (in --output-dir):
@@ -23,7 +23,7 @@ Outputs (in --output-dir):
                           per-trunk analyses (not declared workflow outputs)
 
 Usage:
-    python src/scripts/collect_predictions_borzoi.py \\
+    python workflows/12-borzoi_evaluation/scripts/collect_predictions_borzoi.py \\
         --models results/finetuning/borzoi/trunk_r{0,1,2,3}/model_best.mergeW.h5 \\
         --params results/finetuning/borzoi/trunk_r0/params.json \\
         --targets support/borzoi/targets.txt \\
@@ -45,8 +45,10 @@ import numpy as np
 import pandas as pd
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, HERE)
-sys.path.insert(0, os.path.join(os.path.dirname(HERE), "borzoi_eval"))
+# evaluation_provenance.py is shared with the AlphaGenome evaluations.
+SRC_SCRIPTS_DIR = os.path.normpath(os.path.join(HERE, "..", "..", "..", "src", "scripts"))
+sys.path.insert(0, SRC_SCRIPTS_DIR)
+sys.path.insert(0, os.path.join(HERE, "upstream"))
 
 import evaluation_provenance  # noqa: E402
 import evaluate_borzoi_checkpoint as ebc  # noqa: E402
@@ -109,7 +111,7 @@ def main() -> None:
         },
         code_paths=[
             __file__,
-            os.path.join(HERE, "evaluation_provenance.py"),
+            os.path.join(SRC_SCRIPTS_DIR, "evaluation_provenance.py"),
             ebc.__file__,
         ],
     )
