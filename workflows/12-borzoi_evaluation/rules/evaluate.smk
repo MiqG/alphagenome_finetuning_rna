@@ -112,7 +112,7 @@ rule collect_predictions:
         batch_size = BORZOI_EVAL["batch_size"],
     benchmark:
         os.path.join(EVAL_OUTPUT_DIR, "benchmarks", "{subset}", "collect_predictions.tsv")
-    threads: 8
+    threads: 2
     resources:
         runtime   = int(24 * 60),
         partition = "gpu_diasfrazer",
