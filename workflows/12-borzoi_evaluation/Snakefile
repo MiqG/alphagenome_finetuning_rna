@@ -12,7 +12,10 @@ Two rules per subset, as in workflows/06-evaluation and workflows/10-jax_finetun
                             prediction parquets in the AlphaGenome schema
   2. compute_metrics     -- CPU: src/scripts/compute_eval_metrics.py, unchanged,
                             so metrics.parquet is directly comparable to the
-                            AlphaGenome runs
+                            AlphaGenome runs (mean-pooled convention); plus
+                            compute_metrics_borzoi_native.py -> metrics_native.json,
+                            the upstream metrics at Borzoi's native 32 bp view
+                            (bin sums, exon-base-weighted gene means)
 
 Inference uses the unmodified upstream evaluation code (scripts/upstream/,
 abuendia/alphagenome-pytorch, branch abuen/borzoi-eval). The parquet helpers are
@@ -26,7 +29,8 @@ Subsets:
 Outputs:
   results/evaluation/borzoi/full/{subset}/predictions/{regions.parquet,run_info.json}
   results/evaluation/borzoi/full/{subset}/predictions/*.parquet (AlphaGenome schema)
-  results/evaluation/borzoi/full/{subset}/metrics.parquet, metrics.json
+  results/evaluation/borzoi/full/{subset}/predictions/borzoi_native_32bp_*.parquet
+  results/evaluation/borzoi/full/{subset}/metrics.parquet, metrics.json, metrics_native.json
 
 Run with:
     snakemake -s workflows/12-borzoi_evaluation/Snakefile --use-conda [-n]

@@ -26,6 +26,7 @@ SCRIPTS_DIR    = "workflows/12-borzoi_evaluation/scripts"
 COLLECT_SCRIPT = os.path.join(SCRIPTS_DIR, "collect_predictions_borzoi.py")
 # Shared with the AlphaGenome evaluations (workflows 06 and 10), unchanged.
 METRICS_SCRIPT = "src/scripts/compute_eval_metrics.py"
+NATIVE_METRICS_SCRIPT = os.path.join(SCRIPTS_DIR, "compute_metrics_borzoi_native.py")
 
 # Subsets to evaluate: test (held-out) + train_sample (overfitting check)
 EVAL_SUBSETS = ["test", "train_sample"]
@@ -78,6 +79,13 @@ EXPORT_FILES = [
     "rna_seq_track_totals_per_interval.parquet",
 ]
 
+# Native Borzoi view at 32 bp (bin sums, exon-base-weighted genes), see collect_predictions_borzoi.py.
+NATIVE_FILES = [
+    "borzoi_native_32bp_per_region.parquet",
+    "borzoi_native_32bp_per_track.parquet",
+    "borzoi_native_32bp_gene_expression.parquet",
+]
+
 EVAL_TARGETS = expand(
     os.path.join(EVAL_OUTPUT_DIR, "{subset}", "metrics.parquet"),
     subset=EVAL_SUBSETS,
@@ -101,7 +109,7 @@ rule collect_predictions:
         bigwigs      = _bigwigs,
         gtf_parquet  = config["gencode"]["paths"]["gtf_parquet"],
     output:
-        files = expand(os.path.join(EVAL_OUTPUT_DIR, "{{subset}}", "predictions", "{name}"), name=EXPORT_FILES),
+        files = expand(os.path.join(EVAL_OUTPUT_DIR, "{{subset}}", "predictions", "{name}"), name=EXPORT_FILES + NATIVE_FILES),
     params:
         output_dir = lambda wildcards: os.path.join(EVAL_OUTPUT_DIR, wildcards.subset, "predictions"),
         samples    = " ".join(SAMPLES),
@@ -144,14 +152,15 @@ rule collect_predictions:
 
 
 rule compute_metrics:
-    """Metrics from the prediction parquets, with the same script as the AlphaGenome runs."""
+    """Metrics from the prediction parquets: the shared AlphaGenome script, plus the native Borzoi 32 bp summary."""
     wildcard_constraints:
         subset = "|".join(EVAL_SUBSETS),
     input:
-        files = expand(os.path.join(EVAL_OUTPUT_DIR, "{{subset}}", "predictions", "{name}"), name=EXPORT_FILES),
+        files = expand(os.path.join(EVAL_OUTPUT_DIR, "{{subset}}", "predictions", "{name}"), name=EXPORT_FILES + NATIVE_FILES),
     output:
         metrics_json    = os.path.join(EVAL_OUTPUT_DIR, "{subset}", "metrics.json"),
         metrics_parquet = os.path.join(EVAL_OUTPUT_DIR, "{subset}", "metrics.parquet"),
+        metrics_native  = os.path.join(EVAL_OUTPUT_DIR, "{subset}", "metrics_native.json"),
     params:
         predictions_dir = lambda wildcards: os.path.join(EVAL_OUTPUT_DIR, wildcards.subset, "predictions"),
         output_dir      = lambda wildcards: os.path.join(EVAL_OUTPUT_DIR, wildcards.subset),
@@ -174,6 +183,10 @@ rule compute_metrics:
             --predictions-dir {params.predictions_dir} \
             --output-dir {params.output_dir} \
             --min-junction-counts 5
+
+        python {NATIVE_METRICS_SCRIPT} \
+            --predictions-dir {params.predictions_dir} \
+            --output {output.metrics_native}
 
         echo "Done computing metrics for subset {wildcards.subset}"
         """
