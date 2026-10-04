@@ -9,7 +9,7 @@ prediction parquets that collect_predictions.py writes for AlphaGenome, so the
 unchanged src/scripts/compute_eval_metrics.py works on Borzoi runs too:
 
   rna_seq_per_gene.parquet / rna_seq_per_gene_32bp.parquet
-  rna_seq_profile_corr_{exon,full,central}_{1bp,32bp}.parquet
+  rna_seq_profile_corr_{exon,central}_{1bp,32bp}.parquet
   rna_seq_profile_corr_per_interval.parquet
   rna_seq_profile_corr_{exon,central}_32bp_sum.parquet          (bin-sum variants)
   rna_seq_profile_corr_per_interval_32bp_sum.parquet
@@ -24,7 +24,9 @@ AlphaGenome ones (rna_eval_helpers.py), so definitions match by construction.
 Conventions that follow from Borzoi:
   - Borzoi only predicts the central 196,608 bp of each BED interval, so that
     window plays the role of the whole window: genes are assigned (>=50% exon bp)
-    and exon means are taken inside it. "full"-scope outputs are NaN / empty.
+    and exon means are taken inside it. The "full"-scope values (columns of the
+    per-interval / totals parquets) are NaN; the empty rna_seq_profile_corr_full_*
+    files are not written.
   - Borzoi's native resolution is 32 bp (bin sums). The 1 bp prediction is the
     bin repeated 32x (per-base value = bin sum / 32): it carries no within-bin
     information, so 32 bp is the resolution-matched view.
@@ -205,9 +207,8 @@ def write_alphagenome_parquets(
     forward_track_indices = list(range(0, n_tracks, 2))
     reverse_track_indices = list(range(1, n_tracks, 2))
 
-    # The two "full" accumulators stay empty: Borzoi has no full-window prediction.
     acc = {name: ProfileCorrAccumulator(n_tracks) for name in (
-        "exon_1bp", "full_1bp", "exon_32bp", "full_32bp", "central_1bp", "central_32bp",
+        "exon_1bp", "exon_32bp", "central_1bp", "central_32bp",
     )}
     acc["central_32bp_sum"] = ProfileCorrAccumulator(n_tracks)
     acc["exon_32bp_sum"] = ProfileCorrAccumulator(n_tracks)

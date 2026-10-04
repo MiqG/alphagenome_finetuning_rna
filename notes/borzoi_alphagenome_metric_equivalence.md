@@ -94,7 +94,7 @@ accumulated central 1 bp Pearson identical (1e-9), same columns and dtypes as a 
 Conventions used on the Borzoi side (these already follow the AlphaGenome conventions, so items 2 and 3
 above only need changes on the AlphaGenome side for the gene window and the region intersection):
 - the central 196,608 bp window plays the role of the whole window (gene assignment and exon means);
-  "full" scope outputs are NaN or empty;
+  the "full"-scope values are NaN (and the empty `rna_seq_profile_corr_full_*` files are not written);
 - 1 bp = bin sum / 32 repeated; 32 bp = per-base mean in the bin (AlphaGenome's mean pooling), so the
   32 bp log1p profile is log1p(mean) on both sides;
 - `interval_idx` and start/end are those of the BED interval.

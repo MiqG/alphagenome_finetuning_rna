@@ -69,8 +69,6 @@ EXPORT_FILES = [
     "rna_seq_per_gene_32bp.parquet",
     "rna_seq_profile_corr_exon_1bp.parquet",
     "rna_seq_profile_corr_exon_32bp.parquet",
-    "rna_seq_profile_corr_full_1bp.parquet",
-    "rna_seq_profile_corr_full_32bp.parquet",
     "rna_seq_profile_corr_central_1bp.parquet",
     "rna_seq_profile_corr_central_32bp.parquet",
     "rna_seq_profile_corr_per_interval.parquet",
