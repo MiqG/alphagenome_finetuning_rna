@@ -1,0 +1,42 @@
+"""
+Workflow 12 -- Evaluation of fine-tuned Borzoi trunks on the FOLD_1 test set.
+
+Evaluates an ensemble of replicate Borzoi trunks (config
+finetuning.borzoi.evaluation, one directory per replicate under
+results/finetuning/borzoi/trunk_r{0..3}) fine-tuned on the SF3B1 RNA-seq
+tracks (2 samples x 2 strands).
+
+Two steps per subset, mirroring workflows/06-evaluation and
+workflows/10-jax_finetuning so metrics can be recomputed without repeating
+inference:
+  1. collect_predictions_borzoi -- GPU inference per trunk, untransform
+                                    (soft clip / sqrt / scale), mean over trunks
+  2. compute_metrics_borzoi     -- CPU: profile + gene-expression metrics at
+                                    1 bp (native bin repeated) and 32 bp
+
+The model and metric code is the unmodified upstream evaluation script
+(src/borzoi_eval/, abuendia/alphagenome-pytorch, branch abuen/borzoi-eval).
+
+Subsets:
+  test          -- held-out test intervals
+  train_sample  -- seeded random sample of train intervals, same size as test
+
+Outputs:
+  results/evaluation/borzoi/full/{subset}/predictions/{predictions_32bp.npy,regions.parquet,run_info.json}
+  results/evaluation/borzoi/full/{subset}/summary.json (+ per-region / per-gene CSVs)
+
+Run with:
+    snakemake -s workflows/12-borzoi_evaluation/Snakefile --use-conda [-n]
+
+Submit real runs via SLURM, not on the login node:
+    ./src/scripts/submit_snakemake_slurm.sh \\
+        "snakemake -s workflows/12-borzoi_evaluation/Snakefile --use-conda -j 2 --rerun-incomplete"
+"""
+
+configfile: "config/config.yaml"
+
+include: "rules/evaluate.smk"
+
+rule all:
+    input:
+        EVAL_TARGETS,

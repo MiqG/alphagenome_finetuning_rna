@@ -1,0 +1,5 @@
+	identifier	file	clip	clip_soft	scale	sum_stat	strand_pair	description
+0	SRR17111303+	/scratch/m000097/abuen/ag/ag-data/borzoi_transfer_data/outputs/borzoi_rna_transfer/sf3b1mut/w5/SRR17111303+.w5	768.0	384.0	0.3	sum_sqrt	1	RNA:SRR17111303+
+1	SRR17111303-	/scratch/m000097/abuen/ag/ag-data/borzoi_transfer_data/outputs/borzoi_rna_transfer/sf3b1mut/w5/SRR17111303-.w5	768.0	384.0	0.3	sum_sqrt	0	RNA:SRR17111303-
+2	SRR17111311+	/scratch/m000097/abuen/ag/ag-data/borzoi_transfer_data/outputs/borzoi_rna_transfer/sf3b1mut/w5/SRR17111311+.w5	768.0	384.0	0.3	sum_sqrt	3	RNA:SRR17111311+
+3	SRR17111311-	/scratch/m000097/abuen/ag/ag-data/borzoi_transfer_data/outputs/borzoi_rna_transfer/sf3b1mut/w5/SRR17111311-.w5	768.0	384.0	0.3	sum_sqrt	2	RNA:SRR17111311-

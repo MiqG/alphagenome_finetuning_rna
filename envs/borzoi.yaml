@@ -1,0 +1,13 @@
+name: borzoi
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+    - tensorflow[and-cuda]~=2.15.0
+    - pyarrow<15
+    # TensorFlow Baskerville (module name: baskerville). The PyPI "baskerville"
+    # is an unrelated package and calico/baskerville is now a PyTorch rewrite.
+    - git+https://github.com/calico/baskerville-tf.git

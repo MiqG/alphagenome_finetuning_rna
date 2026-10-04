@@ -67,6 +67,17 @@ finetuning:
       clip: 768
       clip_soft: 384
       scale: 0.005  # 1/(fragment_length ~200bp) for raw coverage bigwigs
+    evaluation:
+      # Externally trained trunks (one dir per replicate, FOLD_1), evaluated by
+      # workflows/12-borzoi_evaluation. `targets` is the targets.txt used to train
+      # the trunks (clip_soft 384, scale 0.3, sum_sqrt); the untransform reads it.
+      trunks_dir: "results/finetuning/borzoi"
+      num_reps: 4
+      targets: "support/borzoi/targets.txt"
+      output_dir: "results/evaluation/borzoi/full"
+      crop_bp: 163840
+      pool_width: 32
+      batch_size: 1
   alphagenome:
     finetune_script: "src/alphagenome-pytorch/scripts/finetune.py"
     convert_folds_script: "src/alphagenome-pytorch/scripts/convert_borzoi_folds.py"
