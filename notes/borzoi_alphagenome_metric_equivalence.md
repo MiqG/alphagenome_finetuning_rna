@@ -101,29 +101,3 @@ above only need changes on the AlphaGenome side for the gene window and the regi
 
 Still open on the AlphaGenome side: gene assignment and exon means over the central window
 (item 1), and intersecting regions (item 4).
-
-## Native resolution (Borzoi outputs 32 bp bins)
-
-Borzoi's native view is 32 bp bin sums; its "1 bp" view is the bin repeated 32x and carries no within-bin
-information, so 1 bp comparisons build in a resolution gap (AlphaGenome resolves exon boundaries). The fair
-comparison is at 32 bp, with AlphaGenome pooled down to Borzoi's bins (bin edges coincide: the central window
-starts 13,312 x 32 bp into the 1 Mb interval).
-
-Borzoi runs therefore write two flavours (AlphaGenome is not changed):
-- AlphaGenome-compatible (mean-pooled 32 bp, bins-touched gene means): same parquets as AlphaGenome, shared
-  `compute_eval_metrics.py` -> `metrics.parquet`; comparable with the existing AlphaGenome results.
-- Native (sum-pooled 32 bp, exon-base-weighted gene means, upstream definitions): `borzoi_native_32bp_*.parquet`
-  -> `metrics_native.json` (profile r, accumulated r, count raw/log1p, JS, MSE, gene correlations).
-
-What AlphaGenome has at 32 bp today: the 32 bp parquets are collected, and workflow 09 summarises gene expression
-and per-track profile Pearson (per interval and accumulated, central) at 1 bp and 32 bp, restricted to genes shared
-by all models. Not available at 32 bp for AlphaGenome: pooled raw profile r, JSD, MSE (1 bp central only), and
-anything in the sum convention. log1p-based 32 bp metrics depend on mean vs sum pooling (log1p(mean) vs log1p(sum));
-raw Pearson and JS do not.
-
-Gene metrics without re-running AlphaGenome: AlphaGenome assigns genes and takes exon means over the 1 Mb window.
-For comparison, keep genes present in all models (workflow 09 does this) and, additionally, genes whose exons lie
-entirely inside a Borzoi central window, so exon base sets are identical. Caveat: AlphaGenome's prediction for a gene
-comes from the first qualifying interval, possibly a different context window than Borzoi's.
-Across-tracks-by-gene gene correlation is degenerate with 2 tracks (centred values (x, -x) give +-1), so the native
-summary omits it.

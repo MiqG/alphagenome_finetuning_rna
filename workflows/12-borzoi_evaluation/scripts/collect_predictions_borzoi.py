@@ -31,15 +31,6 @@ Conventions that follow from Borzoi:
 Splice-site, SSU, junction and PSI outputs do not exist for Borzoi
 (compute_eval_metrics.py skips missing parquets).
 
-Native Borzoi view (32 bp, sum-pooled bins, exon-base-weighted gene means), using
-the upstream functions on the full 32 bp arrays (small: ~625 MB each), also as
-parquets for compute_metrics_borzoi_native.py:
-  borzoi_native_32bp_per_region.parquet   — per region: log1p track-pooled profile
-                                            Pearson r, JS divergence / distance, MSE
-  borzoi_native_32bp_per_track.parquet    — per track: accumulated log1p Pearson r
-  borzoi_native_32bp_gene_expression.parquet — per gene and sample: exon-base-weighted
-                                            mean coverage (pred / obs)
-
 Also written next to the parquets (not declared workflow outputs):
   regions.parquet, run_info.json — retained regions and run settings
   .progress/trunk_<i>.npy        — per-trunk raw predictions (untransformed, per-bin
@@ -80,7 +71,6 @@ sys.path.insert(0, os.path.join(HERE, "upstream"))
 
 import evaluation_provenance  # noqa: E402
 import evaluate_borzoi_checkpoint as ebc  # noqa: E402
-from compute_gene_metrics import collect_gene_expression_rows  # noqa: E402
 from rna_eval_helpers import (  # noqa: E402
     ProfileCorrAccumulator,
     accumulator_to_df,
@@ -141,12 +131,8 @@ def write_alphagenome_parquets(
     samples: list[str],
     gtf_parquet: str,
     output_dir: str,
-) -> np.ndarray:
-    """Write the AlphaGenome-schema RNA-seq parquets (see module docstring).
-
-    Returns the observed 32 bp bin sums (n_regions, n_bins, n_tracks), float32,
-    gathered along the way for the native-view tables.
-    """
+) -> None:
+    """Write the AlphaGenome-schema RNA-seq parquets (see module docstring)."""
     import pyBigWig
 
     n_regions, n_bins, n_tracks = predictions.shape
@@ -189,7 +175,6 @@ def write_alphagenome_parquets(
     acc = {name: ProfileCorrAccumulator(n_tracks) for name in (
         "exon_1bp", "full_1bp", "exon_32bp", "full_32bp", "central_1bp", "central_32bp",
     )}
-    obs_32_sum = np.zeros((n_regions, n_bins, n_tracks), dtype=np.float32)
     rna_rows, rna_rows_32bp = [], []
     interval_corr_rows, pooled_rows, totals_rows = [], [], []
 
@@ -204,7 +189,6 @@ def write_alphagenome_parquets(
         pred_1 = np.repeat(pred_32, POOL, axis=0)
         obs_1 = fetch_obs_window(bigwigs, chrom, win_start, win_end, chrom_sizes)
         obs_32 = obs_1.reshape(n_bins, POOL, -1).mean(axis=1)
-        obs_32_sum[pos] = obs_32 * POOL
 
         log_p1, log_o1 = np.log1p(pred_1), np.log1p(obs_1)
         log_p32, log_o32 = np.log1p(pred_32), np.log1p(obs_32)
@@ -298,65 +282,6 @@ def write_alphagenome_parquets(
                    os.path.join(output_dir, "rna_seq_profile_metrics_per_interval.parquet"))
     _write_parquet(pd.DataFrame(totals_rows),
                    os.path.join(output_dir, "rna_seq_track_totals_per_interval.parquet"))
-    return obs_32_sum
-
-
-def write_native_32bp_tables(
-    predictions: np.ndarray,
-    obs_32_sum: np.ndarray,
-    regions: pd.DataFrame,
-    test_bed: str,
-    samples: list[str],
-    gtf_parquet: str,
-    output_dir: str,
-) -> None:
-    """Native Borzoi view: 32 bp bin sums, upstream metric functions (see module docstring)."""
-    n_regions, n_bins, n_tracks = predictions.shape
-    bed = pd.read_csv(test_bed, sep="\t", header=None, usecols=[0, 1, 2],
-                      names=["chrom", "start", "end"])
-
-    metrics = ebc.compute_metrics(predictions, obs_32_sum, "log1p")
-    mse_per_region = np.array([
-        float(np.mean(np.square(predictions[i].astype(np.float64) - obs_32_sum[i])))
-        for i in range(n_regions)
-    ])
-    iv = regions["original_interval_idx"].astype(int).values
-    per_region = pd.DataFrame({
-        "interval_idx": iv,
-        "chrom": regions["chrom"].values,
-        "start": bed.loc[iv, "start"].values,
-        "end": bed.loc[iv, "end"].values,
-        "profile_pearson_r_log1p": metrics["profile_pearson_r_all"],
-        "js_divergence": metrics["js_divergence_all"],
-        "js_distance": metrics["js_distance_all"],
-        "mse": mse_per_region,
-    })
-    _write_parquet(per_region, os.path.join(output_dir, "borzoi_native_32bp_per_region.parquet"))
-
-    per_track = pd.DataFrame({
-        "track_idx": np.arange(n_tracks),
-        "track_name": [samples[t // 2] for t in range(n_tracks)],
-        "strand": ["forward" if t % 2 == 0 else "reverse" for t in range(n_tracks)],
-        "pearson_r_accumulated_log1p": metrics["track_pearson_r_accumulated_all"],
-        "n_positions": n_regions * n_bins,
-    })
-    _write_parquet(per_track, os.path.join(output_dir, "borzoi_native_32bp_per_track.parquet"))
-
-    # Gene expression: upstream selection (>=50% of unique exon bp in the scored
-    # window) and exact exon-base weighting of the 32 bp bins.
-    positions = [
-        (r.chrom, int(r.target_start), int(r.target_end)) for r in regions.itertuples()
-    ]
-    gene_rows = collect_gene_expression_rows(
-        gtf=ebc.load_gtf(gtf_parquet),
-        test_intervals=pd.DataFrame({"original_interval_idx": iv}),
-        positions=positions,
-        prediction_views={POOL: predictions / POOL},
-        target_views={POOL: obs_32_sum / POOL},
-        bin_sizes=(POOL,),
-        sample_names=samples,
-    )
-    _write_parquet(gene_rows, os.path.join(output_dir, "borzoi_native_32bp_gene_expression.parquet"))
 
 
 def main() -> None:
@@ -461,15 +386,11 @@ def main() -> None:
         }, handle, indent=2)
 
     # The parquets are the declared workflow outputs, written last and atomically.
-    obs_32_sum = write_alphagenome_parquets(
+    write_alphagenome_parquets(
         predictions_32bp, regions_df, args.test_bed, args.bigwigs, args.samples,
         args.gtf_parquet, args.output_dir,
     )
-    write_native_32bp_tables(
-        predictions_32bp, obs_32_sum, regions_df, args.test_bed, args.samples,
-        args.gtf_parquet, args.output_dir,
-    )
-    log.info("Wrote AlphaGenome-format and native 32 bp parquets for %d regions to %s", len(regions), args.output_dir)
+    log.info("Wrote AlphaGenome-format RNA-seq parquets for %d regions to %s", len(regions), args.output_dir)
 
 
 if __name__ == "__main__":
