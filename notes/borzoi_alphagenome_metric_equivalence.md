@@ -83,9 +83,11 @@ Compared:
 
 ## Implemented on the Borzoi side (workflow 12)
 
-`workflows/12-borzoi_evaluation/scripts/export_alphagenome_format.py` writes the AlphaGenome
-RNA-seq prediction parquets from the raw Borzoi predictions, importing the helper functions from
-`src/scripts/collect_predictions.py`, and `src/scripts/compute_eval_metrics.py` then runs unchanged.
+`workflows/12-borzoi_evaluation/scripts/collect_predictions_borzoi.py` runs the inference and writes the
+AlphaGenome RNA-seq prediction parquets in the same job, using verbatim copies of the helper functions from
+`src/scripts/collect_predictions.py` (`scripts/rna_eval_helpers.py`, kept in sync by `check_helpers_sync.py`;
+they are copied because collect_predictions.py imports torch, which must not share a process with TensorFlow).
+`src/scripts/compute_eval_metrics.py` then runs unchanged.
 Checked on 20 regions against the upstream Borzoi evaluation: gene values at 1 bp identical (1e-15),
 accumulated central 1 bp Pearson identical (1e-9), same columns and dtypes as a real AlphaGenome run.
 

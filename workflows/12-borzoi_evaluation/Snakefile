@@ -6,23 +6,19 @@ finetuning.borzoi.evaluation, one directory per replicate under
 results/finetuning/borzoi/trunk_r{0..3}) fine-tuned on the SF3B1 RNA-seq
 tracks (2 samples x 2 strands).
 
-Steps per subset, mirroring workflows/06-evaluation and
-workflows/10-jax_finetuning so metrics can be recomputed without repeating
-inference:
-  1. collect_predictions_borzoi -- GPU inference per trunk, untransform
-                                    (soft clip / sqrt / scale), mean over trunks
-  2. export_alphagenome_format  -- CPU: write the AlphaGenome-schema RNA-seq
-                                    parquets (same helper definitions)
-  3. compute_eval_metrics       -- CPU: src/scripts/compute_eval_metrics.py,
-                                    unchanged, so metrics.parquet is directly
-                                    comparable to the AlphaGenome runs
-Optional (not in `rule all`): compute_metrics_borzoi computes the upstream
-profile + gene-expression metrics at 1 bp and 32 bp from the raw predictions
-(summary.json; needs ~512 GB). Request it explicitly:
-    results/evaluation/borzoi/full/{subset}/summary.json
+Two rules per subset, as in workflows/06-evaluation and workflows/10-jax_finetuning:
+  1. collect_predictions -- GPU: inference per trunk, untransform (soft clip /
+                            sqrt / scale), mean over trunks, then the RNA-seq
+                            prediction parquets in the AlphaGenome schema
+  2. compute_metrics     -- CPU: src/scripts/compute_eval_metrics.py, unchanged,
+                            so metrics.parquet is directly comparable to the
+                            AlphaGenome runs
 
-The model and metric code is the unmodified upstream evaluation script
-(scripts/upstream/, abuendia/alphagenome-pytorch, branch abuen/borzoi-eval).
+Inference uses the unmodified upstream evaluation code (scripts/upstream/,
+abuendia/alphagenome-pytorch, branch abuen/borzoi-eval). The parquet helpers are
+verbatim copies of the AlphaGenome ones (scripts/rna_eval_helpers.py; keep them in
+sync with scripts/check_helpers_sync.py). The raw ensemble predictions are also
+kept next to the parquets (predictions_32bp.npy).
 
 Subsets:
   test          -- held-out test intervals

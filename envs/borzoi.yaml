@@ -5,9 +5,12 @@ channels:
 dependencies:
   - python=3.10
   - pip
+  - setuptools<81  # pyranges 0.0.129 imports pkg_resources
   - pip:
     - tensorflow[and-cuda]~=2.15.0
     - pyarrow<15
+    # pandas-1.5-compatible pyranges, only for the exon merge in the RNA-seq export.
+    - pyranges==0.0.129
     # TensorFlow Baskerville (module name: baskerville). The PyPI "baskerville"
     # is an unrelated package and calico/baskerville is now a PyTorch rewrite.
     - git+https://github.com/calico/baskerville-tf.git
