@@ -32,10 +32,9 @@ Splice-site, SSU, junction and PSI outputs do not exist for Borzoi
 (compute_eval_metrics.py skips missing parquets).
 
 Also written next to the parquets (not declared workflow outputs):
-  predictions_32bp.npy    — ensemble mean raw predictions, float32,
-                            (n_regions, 6144, n_tracks): per-bin sums of coverage
-  regions.parquet, run_info.json
-  .progress/trunk_<i>.npy — per-trunk raw predictions, used to resume
+  regions.parquet, run_info.json — retained regions and run settings
+  .progress/trunk_<i>.npy        — per-trunk raw predictions (untransformed, per-bin
+                                   coverage sums), used to resume
 
 Usage:
     python workflows/12-borzoi_evaluation/scripts/collect_predictions_borzoi.py \\
@@ -373,7 +372,6 @@ def main() -> None:
 
     os.makedirs(args.output_dir, exist_ok=True)
     regions_df = pd.DataFrame(regions)
-    _atomic_save_npy(os.path.join(args.output_dir, "predictions_32bp.npy"), predictions_32bp)
     regions_df.to_parquet(os.path.join(args.output_dir, "regions.parquet"), index=False)
     with open(os.path.join(args.output_dir, "run_info.json"), "w") as handle:
         json.dump({

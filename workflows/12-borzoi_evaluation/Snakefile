@@ -17,15 +17,14 @@ Two rules per subset, as in workflows/06-evaluation and workflows/10-jax_finetun
 Inference uses the unmodified upstream evaluation code (scripts/upstream/,
 abuendia/alphagenome-pytorch, branch abuen/borzoi-eval). The parquet helpers are
 verbatim copies of the AlphaGenome ones (scripts/rna_eval_helpers.py; keep them in
-sync with scripts/check_helpers_sync.py). The raw ensemble predictions are also
-kept next to the parquets (predictions_32bp.npy).
+sync with scripts/check_helpers_sync.py).
 
 Subsets:
   test          -- held-out test intervals
   train_sample  -- seeded random sample of train intervals, same size as test
 
 Outputs:
-  results/evaluation/borzoi/full/{subset}/predictions/{predictions_32bp.npy,regions.parquet,run_info.json}
+  results/evaluation/borzoi/full/{subset}/predictions/{regions.parquet,run_info.json}
   results/evaluation/borzoi/full/{subset}/predictions/*.parquet (AlphaGenome schema)
   results/evaluation/borzoi/full/{subset}/metrics.parquet, metrics.json
 
