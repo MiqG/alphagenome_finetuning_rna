@@ -58,6 +58,15 @@ AG_MODEL_LABELS = {
 }
 BORZOI_LABEL = "Borzoi (ensemble)"
 BORZOI_BIN_WIDTH = 32
+
+# Condition-specific gene classes, defined on the reference model's observed
+# log1p(exon mean coverage per base): "present" >= ~0.65 reads/base, "absent" < ~0.1
+# reads/base. The gap between the two keeps a gene from switching class on a single
+# read; WT and K700E are very similar (r = 0.98), so true specific genes are rare.
+GENE_PRESENT = 0.5
+GENE_ABSENT = 0.1
+DIFF_SAMPLE = "K700E vs WT"
+CLASS_SAMPLE = {"wt_specific": "WT", "k700e_specific": "K700E"}
 PANGOLIN_MODEL_LABELS = {
     "probing": "Pangolin (probing)",
     "full":    "Pangolin (full)",
@@ -366,6 +375,40 @@ def per_gene_pearson_rows(rna_df: pd.DataFrame, resolution_label: str) -> list[d
     return rows
 
 
+def gene_condition_classes(rna_ref: pd.DataFrame) -> dict[str, set]:
+    """Partition genes by observed expression in WT and K700E (see GENE_PRESENT/GENE_ABSENT).
+
+    Returns {"shared", "wt_specific", "k700e_specific", "expressed"}; "expressed" (present
+    in at least one sample) is the gene set of the differential setting.
+    """
+    obs = rna_ref.pivot_table(index="gene_id", columns="track_name", values="obs_log_mean", aggfunc="mean")
+    wt, k7 = obs[SAMPLE_ID_OF["WT"]], obs[SAMPLE_ID_OF["K700E"]]
+    return {
+        "shared":         set(obs.index[(wt >= GENE_PRESENT) & (k7 >= GENE_PRESENT)]),
+        "wt_specific":    set(obs.index[(wt >= GENE_PRESENT) & (k7 < GENE_ABSENT)]),
+        "k700e_specific": set(obs.index[(k7 >= GENE_PRESENT) & (wt < GENE_ABSENT)]),
+        "expressed":      set(obs.index[(wt >= GENE_PRESENT) | (k7 >= GENE_PRESENT)]),
+    }
+
+
+def differential_gene_rows(rna_df: pd.DataFrame, genes: set, resolution_label: str) -> list[dict]:
+    """Pearson r between predicted and observed K700E - WT difference of log1p exon mean."""
+    sub = rna_df[rna_df["gene_id"].isin(genes)]
+    wide = sub.pivot_table(index="gene_id", columns="track_name",
+                           values=["obs_log_mean", "pred_log_mean"], aggfunc="mean")
+    wt_id, k7_id = SAMPLE_ID_OF["WT"], SAMPLE_ID_OF["K700E"]
+    obs = (wide["obs_log_mean"][k7_id] - wide["obs_log_mean"][wt_id]).values
+    pred = (wide["pred_log_mean"][k7_id] - wide["pred_log_mean"][wt_id]).values
+    mask = np.isfinite(obs) & np.isfinite(pred)
+    obs, pred = obs[mask], pred[mask]
+    r = safe_pearson(obs, pred)
+    if r is None or not np.isfinite(r):
+        return []
+    ci = bootstrap_pearson_ci(obs, pred)
+    return [{"sample": DIFF_SAMPLE, "pearson_r": r, "n": int(len(obs)), "resolution": resolution_label,
+             "ci_lo": ci[0] if ci is not None else None, "ci_hi": ci[1] if ci is not None else None}]
+
+
 def profile_corr_rows(pred_dir: str, scope: str, resolution_label: str, suffix: str = "") -> list[dict]:
     """Pooled accumulated Pearson r -- only sufficient statistics survive upstream
     (ProfileCorrAccumulator), so no raw pairs or per-unit r's exist to resample;
@@ -417,6 +460,10 @@ def prepare_gene_expr(args) -> pd.DataFrame:
         "profile_per_interval": "Profile: mean per interval",
         "profile_accumulated":  "Profile: accumulated",
         "gene_mean_exonic":     "Gene: mean exonic coverage",
+        "gene_shared":          "Gene: shared (expressed in both)",
+        "gene_wt_specific":     "Gene: WT-specific",
+        "gene_k700e_specific":  "Gene: K700E-specific",
+        "gene_differential":    "Gene: K700E vs WT difference",
     }
 
     # Independent collect_predictions.py runs can end up evaluating a slightly
@@ -450,6 +497,13 @@ def prepare_gene_expr(args) -> pd.DataFrame:
                 print("  {} ({}): dropping {} gene(s) not shared across all models ({} -> {})".format(
                     model_label, res_label, n_genes - n_common, n_genes, n_common))
 
+    # Class membership comes from one reference model's observations (the first model, an
+    # AlphaGenome run with 1 Mb gene windows), so every model is scored on the same genes.
+    ref_label = next(iter(pred_dirs))
+    classes = gene_condition_classes(rna_by_model_res[ref_label]["1bp"])
+    print("  gene classes (reference {}): {}".format(
+        ref_label, {k: len(v) for k, v in classes.items()}))
+
     records = []
     for model_label, pred_dir in pred_dirs.items():
         for res_label in resolutions:
@@ -463,6 +517,19 @@ def prepare_gene_expr(args) -> pd.DataFrame:
             rna_common = rna_common[rna_common["gene_id"].isin(common_genes[res_label])]
             for row in per_gene_pearson_rows(rna_common, res_label):
                 row.update({"model": model_label, "setting": "gene_mean_exonic"})
+                records.append(row)
+            for cls in ("shared", "wt_specific", "k700e_specific"):
+                rna_cls = rna_common[rna_common["gene_id"].isin(classes[cls])]
+                for row in per_gene_pearson_rows(rna_cls, res_label):
+                    # in a specific class the other sample is absent (observed ~0, only noise),
+                    # so only the sample the class is specific to gets a bar
+                    if cls in CLASS_SAMPLE and row["sample"] != CLASS_SAMPLE[cls]:
+                        continue
+                    if np.isfinite(row["pearson_r"]):
+                        row.update({"model": model_label, "setting": "gene_" + cls})
+                        records.append(row)
+            for row in differential_gene_rows(rna_common, classes["expressed"], res_label):
+                row.update({"model": model_label, "setting": "gene_differential"})
                 records.append(row)
 
     # Borzoi's native 32 bp view (bin sums, log1p(sum)): all log1p-based settings differ
