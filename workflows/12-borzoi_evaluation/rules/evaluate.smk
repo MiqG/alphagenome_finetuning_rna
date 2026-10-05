@@ -117,7 +117,7 @@ rule collect_predictions:
         runtime   = int(24 * 60),
         partition = "gpu_diasfrazer",
         gres      = "gpu:1g.12gb:1",
-        memory    = 64,
+        memory    = 24,
     conda:
         "borzoi"
     # Per-trunk intermediates live in <output_dir>/.progress/ (not declared
