@@ -22,12 +22,17 @@ PANGOLIN_PROBING_RUN = "annotated__frozen__1gpu"
 PANGOLIN_FULL_RUN    = "annotated__full__1gpu"
 PANGOLIN_EPOCH       = 5
 
+BORZOI_EVAL_DIR = os.path.join("results", "evaluation", "borzoi", "full")
+
 EPOCH  = 10
 SUBSET = "test"
 
 TEST_BED        = os.path.join(config["finetuning"]["alphagenome"]["folds_dir"],
                                 config["preprocessing"]["overfitting"]["fold"], "test.bed")
 SEQUENCE_LENGTH = config["finetuning"]["alphagenome"]["sf3b1mut"]["sequence_length"]
+
+
+BORZOI_PRED_DIR = os.path.join(BORZOI_EVAL_DIR, SUBSET, "predictions")
 
 
 def _ag_pred_dir(eval_dir, run_name):
@@ -42,10 +47,12 @@ rule all_paper:
 
 
 rule prepare_gene_expr_metrics:
-    """Gene expression evaluation: profile per-interval / accumulated / gene mean exonic, 1bp+32bp."""
+    """Gene expression evaluation: profile per-interval / accumulated / gene mean exonic, 1bp+32bp (AlphaGenome + Borzoi ensemble)."""
     input:
         ag_probing_rna = os.path.join(_ag_pred_dir(AG_PROBING_EVAL_DIR, AG_PROBING_RUN), "rna_seq_per_gene.parquet"),
         ag_lora_rna    = os.path.join(_ag_pred_dir(AG_LORA_EVAL_DIR, AG_LORA_RUN), "rna_seq_per_gene.parquet"),
+        borzoi_rna     = os.path.join(BORZOI_PRED_DIR, "rna_seq_per_gene.parquet"),
+        borzoi_rna_sum = os.path.join(BORZOI_PRED_DIR, "rna_seq_profile_corr_per_interval_32bp_sum.parquet"),
     output:
         metrics = os.path.join(PAPER_OUTPUT_DIR, "gene_expr_metrics.parquet"),
     benchmark:
@@ -70,6 +77,7 @@ rule prepare_gene_expr_metrics:
             --ag-lora-run {AG_LORA_RUN} \
             --epoch {EPOCH} \
             --subset {SUBSET} \
+            --borzoi-pred-dir {BORZOI_PRED_DIR} \
             --output {output.metrics}
 
         echo "Done preparing gene expression metrics"

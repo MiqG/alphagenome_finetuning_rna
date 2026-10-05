@@ -15,8 +15,11 @@ site/junction (max distance to both window edges) -- see
 select_max_context_ssu_rows / select_max_context_junction_rows.
 
 Three figures, selected with --figure:
-  gene_expr  -- AlphaGenome probing vs LoRA, 1bp/32bp, three settings
-                (profile per-interval / profile accumulated / gene mean exonic)
+  gene_expr  -- AlphaGenome probing vs LoRA (+ Borzoi ensemble with --borzoi-pred-dir),
+                1bp/32bp, three settings (profile per-interval / profile
+                accumulated / gene mean exonic). Borzoi additionally gets a
+                "32bp_sum" resolution (profile settings only): its native
+                32 bp bin sums, log1p(sum) instead of log1p(mean).
   ssu        -- AlphaGenome (probing/LoRA) + Pangolin (probing/full), common
                 sites only, four settings (general / shared / WT-specific /
                 K700E-specific)
@@ -53,6 +56,7 @@ AG_MODEL_LABELS = {
     "probing": "AlphaGenome (probing)",
     "lora":    "AlphaGenome (LoRA)",
 }
+BORZOI_LABEL = "Borzoi (ensemble)"
 PANGOLIN_MODEL_LABELS = {
     "probing": "Pangolin (probing)",
     "full":    "Pangolin (full)",
@@ -83,6 +87,10 @@ def parse_args() -> argparse.Namespace:
                          "workflows/10-jax_finetuning, which only ever evaluate one checkpoint "
                          "per run, not an epoch series). Repeatable. Included in every figure "
                          "(gene_expr, ssu, junctions) alongside the AG/Pangolin runs.")
+
+    p.add_argument("--borzoi-pred-dir",
+                    help="Predictions directory of the Borzoi ensemble run (workflow 12). "
+                         "Used by --figure gene_expr only (Borzoi has no SSU/junction outputs).")
 
     p.add_argument("--test-bed", default="data/prep/finetuning/alphagenome/FOLD_1/test.bed",
                     help="Evaluation interval BED -- row order is the `interval_idx` used by "
@@ -357,11 +365,11 @@ def per_gene_pearson_rows(rna_df: pd.DataFrame, resolution_label: str) -> list[d
     return rows
 
 
-def profile_corr_rows(pred_dir: str, scope: str, resolution_label: str) -> list[dict]:
+def profile_corr_rows(pred_dir: str, scope: str, resolution_label: str, suffix: str = "") -> list[dict]:
     """Pooled accumulated Pearson r -- only sufficient statistics survive upstream
     (ProfileCorrAccumulator), so no raw pairs or per-unit r's exist to resample;
     no bootstrap CI here."""
-    fpath = os.path.join(pred_dir, "rna_seq_profile_corr_{}_{}.parquet".format(scope, resolution_label))
+    fpath = os.path.join(pred_dir, "rna_seq_profile_corr_{}_{}{}.parquet".format(scope, resolution_label, suffix))
     df = pd.read_parquet(fpath)
     rows = []
     for track_name, sub in df.groupby("track_name"):
@@ -370,15 +378,18 @@ def profile_corr_rows(pred_dir: str, scope: str, resolution_label: str) -> list[
             "sample": sample_label,
             "pearson_r": float(sub["pearson_r"].mean()),
             "n": int(sub["n_positions"].sum()),
-            "resolution": resolution_label,
+            "resolution": resolution_label + suffix,
             "ci_lo": None,
             "ci_hi": None,
         })
     return rows
 
 
-def profile_corr_rows_per_interval(pred_dir: str, resolution_label: str) -> list[dict]:
-    fpath = os.path.join(pred_dir, "rna_seq_profile_corr_per_interval.parquet")
+def profile_corr_rows_per_interval(pred_dir: str, resolution_label: str, suffix: str = "") -> list[dict]:
+    # the AlphaGenome file holds all resolutions; the Borzoi bin-sum one is per resolution
+    fname = "rna_seq_profile_corr_per_interval{}.parquet".format(
+        "_{}{}".format(resolution_label, suffix) if suffix else "")
+    fpath = os.path.join(pred_dir, fname)
     df = pd.read_parquet(fpath)
     col = "pearson_r_central_{}".format(resolution_label)
     rows = []
@@ -392,7 +403,7 @@ def profile_corr_rows_per_interval(pred_dir: str, resolution_label: str) -> list
             "sample": sample_label,
             "pearson_r": float(valid.mean()),
             "n": int(len(valid)),
-            "resolution": resolution_label,
+            "resolution": resolution_label + suffix,
             "ci_lo": ci[0] if ci is not None else None,
             "ci_hi": ci[1] if ci is not None else None,
         })
@@ -415,6 +426,8 @@ def prepare_gene_expr(args) -> pd.DataFrame:
     # identical across models -- profile_per_interval/profile_accumulated already
     # match exactly across models and don't need this.
     pred_dirs = _ag_pred_dirs(args)
+    if args.borzoi_pred_dir:
+        pred_dirs[BORZOI_LABEL] = args.borzoi_pred_dir
     rna_by_model_res = {}
     for model_label, pred_dir in pred_dirs.items():
         rna_by_model_res[model_label] = {
@@ -450,6 +463,16 @@ def prepare_gene_expr(args) -> pd.DataFrame:
             for row in per_gene_pearson_rows(rna_common, res_label):
                 row.update({"model": model_label, "setting": "gene_mean_exonic"})
                 records.append(row)
+
+    # Borzoi's native 32 bp view (bin sums, log1p(sum)); only the log1p-based profile
+    # correlations differ from the mean-pooled "32bp" rows, so no gene setting here.
+    if args.borzoi_pred_dir:
+        for row in profile_corr_rows_per_interval(args.borzoi_pred_dir, "32bp", suffix="_sum"):
+            row.update({"model": BORZOI_LABEL, "setting": "profile_per_interval"})
+            records.append(row)
+        for row in profile_corr_rows(args.borzoi_pred_dir, "central", "32bp", suffix="_sum"):
+            row.update({"model": BORZOI_LABEL, "setting": "profile_accumulated"})
+            records.append(row)
 
     df = pd.DataFrame(records)
     df["setting_label"] = df["setting"].map(settings)
