@@ -18,7 +18,7 @@ Three figures, selected with --figure:
   gene_expr  -- AlphaGenome probing vs LoRA (+ Borzoi ensemble with --borzoi-pred-dir),
                 1bp/32bp, three settings (profile per-interval / profile
                 accumulated / gene mean exonic). Borzoi additionally gets a
-                "32bp_sum" resolution (profile settings only): its native
+                "32bp_sum" resolution (all three settings): its native
                 32 bp bin sums, log1p(sum) instead of log1p(mean).
   ssu        -- AlphaGenome (probing/LoRA) + Pangolin (probing/full), common
                 sites only, four settings (general / shared / WT-specific /
@@ -57,6 +57,7 @@ AG_MODEL_LABELS = {
     "lora":    "AlphaGenome (LoRA)",
 }
 BORZOI_LABEL = "Borzoi (ensemble)"
+BORZOI_BIN_WIDTH = 32
 PANGOLIN_MODEL_LABELS = {
     "probing": "Pangolin (probing)",
     "full":    "Pangolin (full)",
@@ -464,9 +465,17 @@ def prepare_gene_expr(args) -> pd.DataFrame:
                 row.update({"model": model_label, "setting": "gene_mean_exonic"})
                 records.append(row)
 
-    # Borzoi's native 32 bp view (bin sums, log1p(sum)); only the log1p-based profile
-    # correlations differ from the mean-pooled "32bp" rows, so no gene setting here.
+    # Borzoi's native 32 bp view (bin sums, log1p(sum)): all log1p-based settings differ
+    # from the mean-pooled "32bp" rows. The gene table stores log1p(exon mean per base);
+    # the bin-sum exon mean is 32x that, so log1p(32 * expm1(x)) gives it exactly.
     if args.borzoi_pred_dir:
+        rna_sum = rna_by_model_res[BORZOI_LABEL]["32bp"]
+        rna_sum = rna_sum[rna_sum["gene_id"].isin(common_genes["32bp"])].copy()
+        for col in ("obs_log_mean", "pred_log_mean"):
+            rna_sum[col] = np.log1p(BORZOI_BIN_WIDTH * np.expm1(rna_sum[col]))
+        for row in per_gene_pearson_rows(rna_sum, "32bp_sum"):
+            row.update({"model": BORZOI_LABEL, "setting": "gene_mean_exonic"})
+            records.append(row)
         for row in profile_corr_rows_per_interval(args.borzoi_pred_dir, "32bp", suffix="_sum"):
             row.update({"model": BORZOI_LABEL, "setting": "profile_per_interval"})
             records.append(row)
